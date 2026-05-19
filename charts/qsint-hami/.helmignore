@@ -35,4 +35,6 @@ htmlcov/
 # Markdown / docs not needed inside the packaged chart
 OWNERS
 OWNERS_ALIASES
-*.tgz
+# NOTE: do NOT add `*.tgz` here — Helm uses bundled subchart .tgz files in
+# charts/<chart>/charts/. Excluding them breaks `helm upgrade --install`
+# with "missing in charts/ directory: <subchart>".

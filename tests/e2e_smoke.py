@@ -83,8 +83,18 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
     req.add_header("Content-Type", "application/json")
     for k, v in headers.items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Surface the upstream error body — LiteLLM forwards vLLM/llama.cpp
+        # validation errors in the response body, and the default HTTPError
+        # repr only contains the status code.
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        raise AssertionError(f"HTTP {e.code} from {url}: {err_body[:600]}") from e
 
 
 def check_litellm_healthy() -> str:

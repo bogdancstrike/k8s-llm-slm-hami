@@ -1,56 +1,729 @@
-# QSINT AI Platform PoC — Documentație Tehnică
+# QSINT AI Platform — On-prem PoC
 
-> **Versiune:** 1.0
-> **Data:** 2026-05-18
-> **Autor:** Bogdan
-> **Scop:** PoC GitOps-driven AI platform on-prem, inspirat din AWS re:Invent 2026
-> "Building an Internal AI Platform with KRO" — adaptat pentru kubeadm + RTX 3080.
+> **Version:** 2.0  
+> **Last updated:** 2026-05-19  
+> **Author:** Bogdan  
+> **Inspiration:** AWS re:Invent 2026 — "Building an Internal AI Platform with KRO" — adapted from EKS+Karpenter+ACK to a single-node MicroK8s box with one RTX 3080.
 
----
+A GitOps-driven, self-service AI platform that lets a developer push an
+`InferenceEndpoint` YAML and have a model live, observable and chat-accessible
+in minutes — on hardware most people already have on their desk.
 
-## Cuprins
-
-1. [Scop și context](#1-scop-și-context)
-2. [Decizii arhitecturale](#2-decizii-arhitecturale)
-3. [High-Level Design (HLD)](#3-high-level-design-hld)
-4. [Low-Level Design (LLD)](#4-low-level-design-lld)
-5. [Componente — detaliat](#5-componente--detaliat)
-6. [Observability stack](#6-observability-stack)
-7. [Prerequisites](#7-prerequisites)
-8. [Tutorial: instalare pas cu pas](#8-tutorial-instalare-pas-cu-pas)
-9. [Tutorial: cum adaugi un model nou](#9-tutorial-cum-adaugi-un-model-nou)
-10. [Tutorial: cum verifici GPU sharing real](#10-tutorial-cum-verifici-gpu-sharing-real)
-11. [Tutorial: cum citești distributed traces în Jaeger](#11-tutorial-cum-citești-distributed-traces-în-jaeger)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Production hardening checklist](#13-production-hardening-checklist)
-14. [Path către prod cu L40S](#14-path-către-prod-cu-l40s)
-15. [CPU backend cu llama.cpp](#15-cpu-backend-cu-llamacpp)
+| | |
+|---|---|
+| Target cluster | MicroK8s, single node, `gpu=on` label |
+| GPU | NVIDIA RTX 3080 10 GB, vGPU partitioned by HAMi |
+| Install model | Helm charts in `charts/`, applied by `scripts/deploy-microk8s.sh` |
+| Sync (post-bootstrap) | Argo CD |
+| Inference runtimes | KServe `ClusterServingRuntime` — vLLM (GPU) + llama.cpp (CPU) |
+| Model abstraction | KRO `InferenceEndpoint` CRD (one YAML per model) |
+| Gateway | LiteLLM (OpenAI-compatible) |
+| Chat UI | Open WebUI |
+| Source control | Self-hosted GitLab CE |
+| Observability | kube-prometheus-stack, Grafana, OTel Collector, Jaeger, Langfuse |
 
 ---
 
-## Local UI access and credentials
+## Table of contents
 
-Run the host setup helper once on the workstation where the browser runs:
+1. [Goals & non-goals](#1-goals--non-goals)
+2. [Why it exists](#2-why-it-exists)
+3. [Architectural decisions](#3-architectural-decisions)
+4. [High-level design (HLD)](#4-high-level-design-hld)
+5. [Low-level design (LLD)](#5-low-level-design-lld)
+6. [Components in detail](#6-components-in-detail)
+7. [Observability stack](#7-observability-stack)
+8. [Models deployed in this PoC](#8-models-deployed-in-this-poc)
+9. [Local UIs & credentials](#9-local-uis--credentials)
+10. [Prerequisites](#10-prerequisites)
+11. [Install](#11-install)
+12. [Add a new model](#12-add-a-new-model)
+13. [Tests](#13-tests)
+14. [Verify GPU sharing](#14-verify-gpu-sharing)
+15. [Read distributed traces in Jaeger](#15-read-distributed-traces-in-jaeger)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Production hardening checklist](#17-production-hardening-checklist)
+18. [Path to production with L40S](#18-path-to-production-with-l40s)
+19. [CPU backend with llama.cpp](#19-cpu-backend-with-llamacpp)
+20. [Repo layout](#20-repo-layout)
+21. [Cheat-sheet](#21-cheat-sheet)
+22. [References](#22-references)
+
+---
+
+## 1. Goals & non-goals
+
+### What the PoC does
+
+Reproduce the AWS slide deck developer experience on a single consumer GPU:
+a developer commits `charts/qsint-workloads/templates/new-model.yaml`, Argo CD
+syncs, KRO expands the abstraction into KServe + a registration Job, and within
+minutes the model is:
+
+```text
+git push                                  ← developer action
+   ↓
+Argo CD detects change                    ← GitOps sync
+   ↓
+KRO expands the InferenceEndpoint CR      ← abstraction layer
+   ↓
+KServe creates the Deployment + Service   ← serving infra
+   ↓
+HAMi schedules the pod onto a vGPU slice  ← GPU sharing
+   ↓
+vLLM downloads the weights from HF        ← model load
+   ↓
+Job registers the model in LiteLLM        ← gateway registration
+   ↓
+Model appears in Open WebUI               ← user access
+```
+
+### What it deliberately does **not** do
+
+- **Production-grade hardening.** Master keys are hard-coded, single replica
+  on critical services, plain-HTTP ingresses. See [§17](#17-production-hardening-checklist).
+- **Multi-GPU tensor-parallel inference.** Single-GPU only. For TP=4 on H200,
+  see [§18](#18-path-to-production-with-l40s).
+- **Training / fine-tuning.** Serving only.
+
+---
+
+## 2. Why it exists
+
+Three reasons, in order of importance:
+
+1. **Validate the stack.** Prove KRO + KServe + HAMi + LiteLLM + Open WebUI +
+   Langfuse + Jaeger compose into a coherent on-prem platform. The AWS talk is
+   EKS-centric (Karpenter, ACK, Knative); we need to show the same logic ports
+   to MicroK8s/kubeadm with open-source equivalents.
+2. **Foundation for QSINT prod.** Every decision here (KServe vs Ray, HAMi vs
+   MIG, single gateway vs direct routing) is a decision that has to hold up on
+   L40S/H200 hardware later. Better to be wrong now, on hardware that costs
+   nothing per hour, than during the migration.
+3. **Self-service developer experience.** Once the platform is up, the team
+   adds models with a git commit — they never touch infrastructure. This is
+   what scales the team.
+
+---
+
+## 3. Architectural decisions
+
+Each choice is recorded with its trade-offs and the alternatives that were
+rejected.
+
+### 3.1 KServe RawDeployment instead of Ray Serve
+
+| Aspect | Choice | Reason |
+|---|---|---|
+| Serving runtime | KServe RawDeployment | Single-GPU = no distributed inference needed. Standard HPA + clean ServingRuntime pattern. |
+| Mode | RawDeployment (no Knative) | vLLM cold-start of 60–300 s makes scale-to-zero impractical. Knative adds queue-proxy + Istio. |
+| vLLM runtime | Custom `ClusterServingRuntime` | KServe ships TGI/Triton/MLServer out of the box, not vLLM. |
+
+**Rejected:**
+- **Ray Serve + KubeRay** — overkill on a single GPU. Re-evaluate at multi-GPU TP.
+- **Plain vLLM Deployment** — loses the inference abstraction, autoscaling, standard inference protocol.
+- **Triton Inference Server** — more mature but harder to wire to OpenAI-compatible chat APIs.
+
+### 3.2 HAMi for GPU sharing
+
+| Aspect | Choice | Reason |
+|---|---|---|
+| GPU sharing | HAMi vRAM partitioning | Only option with **real vRAM isolation** on a consumer GPU. |
+
+**Rejected:**
+- **NVIDIA time-slicing** — zero memory isolation; one pod allocating 9 GB OOMs the rest.
+- **MIG** — not supported on RTX 3080 (Ampere consumer). Reserve for the L40S path.
+- **MPS** — good for latency but no vRAM isolation; complex in K8s.
+
+### 3.3 KRO for the abstraction layer
+
+| Aspect | Choice | Reason |
+|---|---|---|
+| Abstraction layer | KRO `ResourceGraphDefinition` | First-class CRD, controller reconciliation loop, typed schema, automatic status aggregation. |
+
+**Rejected:**
+- **Helm chart with values.yaml** — templating only, no controller loop.
+- **Crossplane v2** — more mature but significant overhead.
+- **Custom Kubebuilder operator** — maximum control, weeks of work.
+
+**Accepted risk:** KRO is `v1alpha1`. The API may change. Re-evaluate in 6 months.
+
+### 3.4 Shared PostgreSQL for LiteLLM + Langfuse
+
+One PostgreSQL StatefulSet with two logical databases (`litellm`, `langfuse`).
+Same "Platform DB" pattern as the AWS slide.
+
+**Rejected:**
+- **One Postgres per service** — wasted RAM on a homelab; OK for prod.
+- **SQLite in-process** — blocks multi-replica HPA scaling for LiteLLM.
+
+### 3.5 LiteLLM as the single gateway
+
+Every request transits LiteLLM, regardless of backend (local vLLM, OpenAI,
+Anthropic, Bedrock, …). Benefits: per-team budgets, virtual API keys, unified
+callbacks (Langfuse + OTel), A/B testing by swapping aliases.
+
+**Accepted risk:** SPOF + ~10–20 ms latency overhead. Mitigated by HPA + 2+
+replicas in prod.
+
+### 3.6 OTel Collector instead of direct-to-Jaeger
+
+A central OTel Collector. Clients emit OTLP; the collector routes to the
+backend(s). Best practice.
+
+**Why:**
+- Swap backend (Tempo, Datadog, Honeycomb) without touching clients.
+- `k8sattributes` processor enriches spans with pod / namespace / node.
+- Memory-limiter processor protects against spike OOMs.
+- Tail sampling becomes possible later.
+
+**Rejected:** direct OTLP → Jaeger, Jaeger Agent (deprecated).
+
+### 3.7 Jaeger all-in-one for the PoC
+
+Single pod, in-memory storage. Easy to demo; traces vanish on restart. In prod
+this becomes Jaeger Production with the existing QSINT Elasticsearch backend,
+or a migration to Grafana Tempo.
+
+### 3.8 Helm + a single bootstrap script, with Argo CD on top
+
+The PoC is installed by `scripts/deploy-microk8s.sh` (a chain of `helm
+upgrade --install`). Argo CD is installed in the same chain and afterwards
+takes ownership of further sync (commit-driven changes to `charts/`). The
+bootstrap script is deliberately idempotent — re-running it is the upgrade
+path.
+
+**Why not pure Argo App-of-Apps from the start?** The bootstrap problem (who
+installs Argo CD before Argo CD can install itself) is unpleasant; a script
+sidesteps it on day one. Once stable, you can flip the cluster to fully
+Argo-managed.
+
+---
+
+## 4. High-level design (HLD)
+
+### 4.1 Component map
+
+```mermaid
+flowchart LR
+  subgraph dev["Developer plane"]
+    GitPush["git push<br/>InferenceEndpoint.yaml"]
+  end
+
+  subgraph cluster["MicroK8s node (gpu=on)"]
+    direction LR
+
+    subgraph gitops["GitOps plane"]
+      Argo["Argo CD"]
+    end
+
+    subgraph control["Control plane"]
+      KRO["KRO controller<br/>(RGD: inference-endpoint)"]
+      KServe["KServe"]
+      HAMi["HAMi<br/>vGPU scheduler"]
+    end
+
+    subgraph rtimes["ClusterServingRuntimes"]
+      VLLM["vLLM runtime<br/>(GPU)"]
+      LCPP["llama.cpp runtime<br/>(CPU)"]
+    end
+
+    subgraph models["InferenceServices"]
+      M1["gemma-1b<br/>TinyLlama 1.1B AWQ"]
+      M2["smollm3-3b<br/>Qwen2.5 0.5B AWQ"]
+      M3["qwen25-3b-cpu<br/>Qwen2.5 3B GGUF"]
+    end
+
+    LiteLLM["LiteLLM proxy"]
+    WebUI["Open WebUI"]
+    PG["PostgreSQL"]
+    LF["Langfuse"]
+    JG["Jaeger + OTel collector"]
+    Prom["Prometheus + Grafana"]
+    GitLab["GitLab CE"]
+  end
+
+  GitPush --> GitLab
+  GitLab --> Argo --> KRO
+  KRO --> KServe
+  KServe --> VLLM --> M1
+  VLLM --> M2
+  KServe --> LCPP --> M3
+  M1 -. requests .-> HAMi
+  M2 -. requests .-> HAMi
+
+  WebUI -->|OpenAI API| LiteLLM
+  LiteLLM -->|HTTP /v1| M1
+  LiteLLM -->|HTTP /v1| M2
+  LiteLLM -->|HTTP /v1| M3
+  LiteLLM --> PG
+  LiteLLM -->|callback| LF
+  LiteLLM -->|OTLP| JG
+  Prom -. scrapes .-> models
+  Prom -. scrapes .-> LiteLLM
+```
+
+### 4.2 Namespace map
+
+| Namespace | What lives here |
+|---|---|
+| `argocd` | Argo CD itself and its Applications |
+| `cert-manager` | cert-manager controller + CRDs |
+| `gitlab` | Self-hosted GitLab CE (webservice, sidekiq, gitaly, registry, MinIO, KAS, …) |
+| `kserve` | KServe controller, webhooks, CRDs |
+| `kro-system` | KRO controller + RGDs |
+| `kube-system` | HAMi scheduler + device plugin DaemonSet |
+| `observability` | kube-prometheus-stack (Prometheus, Alertmanager, Grafana) |
+| `ai-platform` | LiteLLM, Open WebUI, Langfuse, PostgreSQL, Jaeger, OTel Collector, ingresses |
+| `inference` | `InferenceEndpoint` CRs, `InferenceServices`, model pods, registration Jobs, shared model-cache PVC |
+
+### 4.3 Request flow — one end-to-end inference
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User browser
+  participant W as Open WebUI
+  participant L as LiteLLM
+  participant V as vLLM pod (gemma-1b)
+  participant O as OTel Collector
+  participant J as Jaeger
+  participant LF as Langfuse
+
+  U->>W: "Explain Kubernetes"
+  W->>L: POST /v1/chat/completions<br/>model=gemma-1b-fast
+  L->>L: lookup alias in Postgres → backend URL
+  L->>V: forward + W3C traceparent header
+  V->>V: tokenize → prefill on vGPU slice → decode
+  V-->>L: streamed completion
+  L-->>W: response
+  W-->>U: render
+  par async telemetry
+    L->>O: OTLP spans
+    V->>O: OTLP spans
+  and
+    L->>LF: Langfuse callback (prompt, completion, tokens, cost)
+  end
+  O->>J: batched spans
+```
+
+---
+
+## 5. Low-level design (LLD)
+
+### 5.1 `InferenceEndpoint` → expanded resources
+
+A developer commits:
+
+```yaml
+apiVersion: kro.run/v1alpha1
+kind: InferenceEndpoint
+metadata:
+  name: gemma-1b
+  namespace: inference
+spec:
+  backend: vllm
+  model: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ"
+  servedName: "gemma-1b"
+  gpuMemMb: 5000
+  gpuMemPercentage: 30
+  gpuCorePercent: 35
+  quantization: "awq"
+  maxModelLen: 2048
+  gpuMemUtilization: "0.85"
+  litellmAlias: "gemma-1b-fast"
+```
+
+The `inference-endpoint` RGD expands this into two children, plus a derived
+chain managed by KServe:
+
+```
+InferenceEndpoint (KRO)
+   │
+   ├─ KServe InferenceService           ← rendered by KRO
+   │     ├─ Deployment                  ← rendered by KServe
+   │     │    └─ Pod (schedulerName: hami-scheduler)
+   │     │         └─ container: vllm/vllm-openai:v0.6.3
+   │     ├─ Service (ClusterIP :80 → :8000)
+   │     └─ HPA (min=1, max=1)
+   │
+   └─ Job: <name>-litellm-register      ← rendered by KRO
+         ├─ wait for /v1/models on the pod
+         └─ POST /model/new on LiteLLM
+```
+
+The Job is gated on `/v1/models` returning 200 from the new pod, so it never
+races KServe's readiness.
+
+### 5.2 HAMi vGPU allocation in detail
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as Pod (schedulerName: hami-scheduler)
+  participant KS as kube-scheduler
+  participant HS as hami-scheduler
+  participant DP as hami device-plugin (DaemonSet)
+  participant K as Kubelet
+  participant C as Container (libvgpu.so)
+  participant CUDA as NVIDIA driver
+
+  P->>KS: created with schedulerName=hami-scheduler
+  KS-->>P: skipped (not my scheduler)
+  HS->>HS: list GPU nodes, pick a node + GPU UUID + slot
+  HS->>P: annotate hami.io/vgpu-devices-allocated=GPU-abc:5000:50
+  K->>DP: AllocateDevices(nvidia.com/gpu)
+  DP-->>K: env: NVIDIA_VISIBLE_DEVICES=GPU-abc<br/>LD_PRELOAD=/usr/local/vgpu/libvgpu.so<br/>CUDA_DEVICE_MEMORY_LIMIT=5368709120
+  K->>C: start container with injected env
+  C->>CUDA: cuMemAlloc(size)
+  CUDA-->>C: libvgpu.so intercepts → enforces limit
+```
+
+The crucial detail: `CUDA_DEVICE_MEMORY_LIMIT` is enforced *inside the
+container* by `libvgpu.so` intercepting CUDA driver calls. Two pods on the
+same physical GPU therefore each see "their" 5 GB and OOM cleanly if they try
+to allocate more.
+
+### 5.3 Chat-template fallback in the vLLM runtime
+
+Some HF quants (notably `Qwen/Qwen2.5-0.5B-Instruct-AWQ`) ship without a
+`chat_template` in `tokenizer_config.json`. transformers ≥ 4.44 refuses to
+synthesize one. To keep the runtime generic, the startup script in
+`charts/qsint-platform/templates/13-vllm-servingruntime.yaml`:
+
+1. Probes the tokenizer with `AutoTokenizer.from_pretrained(MODEL_ID)`.
+2. Checks whether `tokenizer.chat_template` is truthy.
+3. If missing, passes `--chat-template=/etc/vllm/chatml.jinja` (mounted from
+   the `vllm-chat-templates` ConfigMap — a generic ChatML).
+4. If present, leaves the model's own template alone — never clobbered.
+
+This way new ungated quants work even when their authors forgot the template,
+without degrading models that ship their own.
+
+### 5.4 Distributed tracing — end-to-end span tree
+
+```
+litellm-proxy / POST /v1/chat/completions   [340 ms]
+├── litellm-proxy / litellm.routing         [2 ms]
+└── litellm-proxy / POST gemma-1b-pred      [336 ms]
+    └── vllm-inference / vllm.chat_comp     [330 ms]
+        ├── vllm.tokenize                   [3 ms]
+        ├── vllm.prefill                    [120 ms]
+        └── vllm.decode (50 tokens)         [205 ms]
+```
+
+After the `k8sattributes` processor runs, each span carries
+`k8s.namespace.name`, `k8s.pod.name`, `k8s.deployment.name`, `k8s.node.name`,
+plus resource attributes `service.name`, `service.namespace`,
+`deployment.environment=poc`.
+
+### 5.5 LiteLLM model registration sequence
+
+```
+Job: gemma-1b-litellm-register
+  │
+  1. wait loop (up to 30 minutes):
+  │    until curl -sf http://gemma-1b-predictor.../v1/models; do sleep 10; done
+  │
+  2. POST http://litellm.ai-platform.svc:4000/model/new
+  │    Authorization: Bearer $LITELLM_MASTER_KEY
+  │    body:
+  │      model_name:    "gemma-1b-fast"
+  │      litellm_params:
+  │        model:    "openai/gemma-1b"
+  │        api_base: "http://gemma-1b-predictor.inference.svc.cluster.local/v1"
+  │        api_key:  "dummy-not-required-for-self-hosted"
+  │      model_info:
+  │        id: "gemma-1b"
+  │        description: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ via KServe + vLLM GPU"
+  │
+  3. LiteLLM:
+  │    - validate master key
+  │    - INSERT INTO model_table
+  │    - reload internal router config (no restart needed)
+  │    - 200 OK
+  │
+  4. Job exits 0 → ttlSecondsAfterFinished cleans it up an hour later.
+```
+
+---
+
+## 6. Components in detail
+
+### 6.1 Argo CD — GitOps engine
+
+**Role.** Watch GitLab, reconcile cluster state against manifest state.
+Post-bootstrap, every change to `charts/` is picked up automatically.
+
+**Why this engine.** Best-in-class drift detection, mature UI, native
+multi-application/multi-cluster, sync waves and resource hooks come free.
+Flux is fine too — Argo wins on UI ergonomics and the maturity of its
+ApplicationSet.
+
+**Topology.** Applications wrap chart subtrees:
+
+| Application | Source path | Sync wave |
+|---|---|---|
+| `qsint-platform` | `charts/qsint-platform` | 0 |
+| `qsint-kro-templates` | `charts/qsint-kro-templates` | 0 |
+| `qsint-workloads` | `charts/qsint-workloads` | 1 (waits on the CRD) |
+
+Sync waves guarantee the InferenceEndpoint CRD exists before any
+InferenceEndpoint CR is applied.
+
+### 6.2 KRO — Kube Resource Orchestrator
+
+**Role.** Define high-level CRDs (`InferenceEndpoint`) that expand into one
+or more low-level Kubernetes objects (`InferenceService` + `Job`).
+
+**Why KRO.** First-class CRDs (your developers `kubectl get
+inferenceendpoints` and it just works). Typed schema with defaults. CEL
+expressions for substitution. Controller-loop reconciliation, not just
+templating.
+
+**Concepts.**
+- **Schema** — the developer-facing CRD shape.
+- **Resources** — the list of low-level objects produced.
+- **CEL substitution** — `${schema.spec.gpuMemMb}` etc., evaluated at apply
+  time.
+
+The repo ships exactly one RGD: `inference-endpoint` (see
+`charts/qsint-kro-templates/templates/inference-endpoint-rgd.yaml`). It is
+multi-backend: `spec.backend: vllm` selects the GPU runtime, `spec.backend:
+llamacpp` selects the CPU runtime.
+
+### 6.3 KServe — model serving abstraction
+
+**Role.** Turn an `InferenceService` (one model) into a Deployment + Service
++ HPA, picking the right `ClusterServingRuntime` based on `modelFormat`.
+
+**Why KServe.**
+- Decouples *what* (the model) from *how* (vLLM, Triton, llama.cpp, …).
+- Standard inference protocol (v2).
+- HPA integration out of the box.
+- Per-model storage initializers (PVC, S3, OCI modelcar) if you want them.
+
+**RawDeployment mode** (vs Knative-backed) — chosen because vLLM cold-starts
+in minutes; scale-to-zero is the wrong trade.
+
+### 6.4 HAMi — vGPU virtualisation
+
+**Role.** Software GPU virtualization. Multiple pods share one physical GPU
+with hard vRAM limits and soft compute caps.
+
+**Why HAMi.** It's the *only* path on a consumer card. MIG requires
+A100/H100/L40S. Time-slicing has no memory isolation. MPS has no memory
+isolation either. HAMi enforces limits inside the container with
+`libvgpu.so`, which intercepts CUDA driver calls and returns
+`CUDA_ERROR_OUT_OF_MEMORY` past the slice.
+
+**Components in the cluster.**
+
+| Component | Where | Role |
+|---|---|---|
+| `hami-scheduler` (Deployment) | `kube-system` | Custom scheduler; only sees pods with `schedulerName: hami-scheduler`. |
+| `hami-device-plugin` (DaemonSet) | `kube-system` | Advertises `nvidia.com/gpu`, `gpumem`, `gpucores`; injects `libvgpu.so`. |
+| `hami-webhook` (optional) | `kube-system` | Mutating webhook to auto-attach the scheduler name. |
+
+**Resource model.**
+
+| Resource | Unit | Meaning |
+|---|---|---|
+| `nvidia.com/gpu` | count | Number of vGPUs (1/pod, default) |
+| `nvidia.com/gpumem` | MiB | **Hard** vRAM cap |
+| `nvidia.com/gpucores` | % | **Soft** compute share |
+
+### 6.5 vLLM `ClusterServingRuntime`
+
+Defined in `charts/qsint-platform/templates/13-vllm-servingruntime.yaml`.
+
+| Field | Value |
+|---|---|
+| Image | `vllm/vllm-openai:v0.6.3` |
+| API | OpenAI-compatible on port 8000 |
+| Quantization | AWQ (configurable per InferenceService) |
+| Prefix caching | enabled (RadixAttention) |
+| OTLP traces | enabled (`--otlp-traces-endpoint=otel-collector:4317`) |
+| Scheduler | `hami-scheduler` |
+| HF auth | optional secret reference (gated models) |
+| Model cache | RWX PVC, shared across pods |
+| Chat-template fallback | ChatML via ConfigMap, used only when the tokenizer is missing one |
+
+Args parameterised per InferenceService:
+
+```
+--model=$(MODEL_ID)
+--served-model-name=$(SERVED_NAME)
+--quantization=$(QUANTIZATION)
+--max-model-len=$(MAX_MODEL_LEN)
+--gpu-memory-utilization=$(GPU_MEM_UTIL)
+[--chat-template=/etc/vllm/chatml.jinja]   ← only when tokenizer lacks one
+```
+
+### 6.6 llama.cpp `ClusterServingRuntime` (CPU)
+
+Defined in `charts/qsint-platform/templates/14-llamacpp-servingruntime.yaml`.
+
+| Field | Value |
+|---|---|
+| Image | `ghcr.io/ggerganov/llama.cpp:server-b4404` |
+| API | OpenAI-compatible on port 8080 |
+| GPU | none requested |
+| Threads | configurable per model |
+| Model file | GGUF on the shared cache PVC |
+| Cold start | `wget` the GGUF on first boot if not present |
+
+See [§19](#19-cpu-backend-with-llamacpp) for the full story.
+
+### 6.7 LiteLLM proxy
+
+**Role.** Unified OpenAI-compatible gateway over any backend. Local vLLM,
+local llama.cpp, OpenAI, Anthropic, Bedrock, Azure — same surface.
+
+**What we use.**
+- Model routing by alias.
+- Master-key auth for `/model/new`.
+- PostgreSQL backend (model list survives restarts).
+- Callbacks: `langfuse`, `otel`.
+- Prometheus metrics on `/metrics`.
+
+**Why a gateway at all.** Single point for per-team budgets, virtual keys,
+unified callbacks (one OTel pipeline, one Langfuse hook), A/B testing by
+alias swap, and graceful fallback (GPU primary, CPU backup).
+
+### 6.8 Open WebUI
+
+**Role.** ChatGPT-like UI. Configured to talk to LiteLLM as its OpenAI
+backend. Auto-discovers models via `/v1/models` and shows them in the
+dropdown.
+
+```text
+OPENAI_API_BASE_URL = http://litellm.ai-platform.svc.cluster.local:4000/v1
+OPENAI_API_KEY      = <litellm-master-key>
+```
+
+The first user to sign up becomes admin.
+
+### 6.9 Langfuse
+
+**Role.** LLM-specific observability. Unlike Jaeger (generic distributed
+tracing), Langfuse is specialised: prompt/completion logging, token counts,
+cost attribution, evaluation runs, dataset management.
+
+**Components.** Next.js web UI + API, shared PostgreSQL.
+
+**Wired up via** LiteLLM's `success_callback: [langfuse, otel]`.
+
+### 6.10 PostgreSQL (shared)
+
+Single StatefulSet. Init script creates two logical databases (`litellm`,
+`langfuse`). Credentials in a K8s Secret. Sufficient for PoC; in prod, swap
+for CloudNativePG with replication and pgBackRest backups.
+
+### 6.11 OTel Collector + Jaeger
+
+**Collector.** Receives OTLP/gRPC on `:4317`, enriches with
+`k8sattributes`, batches, and forwards to Jaeger over OTLP. Also exposes
+Prometheus metrics for self-monitoring.
+
+**Jaeger.** All-in-one for the PoC (in-memory storage); production should
+swap to ES or Tempo.
+
+### 6.12 GitLab CE
+
+Source-of-truth for the PoC. Vendored chart in `charts/qsint-gitlab/`,
+trimmed to fit single-node MicroK8s (`charts/qsint-gitlab/qsint-values.yaml`
+disables registry, runners, LFS, artifacts to keep RAM ≈ 6 GB).
+
+Why local GitLab when GitHub exists? Because the slide deck's gold standard
+is *self-hosted*: code, secrets, build artifacts never leave the cluster.
+Argo CD points at `gitlab.local.ro` and the workflow becomes air-gap-able.
+
+---
+
+## 7. Observability stack
+
+### 7.1 The pillars
+
+| Pillar | Tool | Where to look |
+|---|---|---|
+| Metrics | Prometheus + Grafana | `grafana.local.ro` |
+| Traces | OTel Collector + Jaeger | `jaeger.local.ro` |
+| Logs | (your existing Loki, if you wire it) | n/a in PoC |
+| LLM-specific | Langfuse | `langfuse.local.ro` |
+
+### 7.2 Metric sources
+
+| Source | Endpoint | Scraped by |
+|---|---|---|
+| vLLM pods | `:8000/metrics` | `PodMonitor` `vllm-inference-pods` |
+| LiteLLM | `litellm:4000/metrics` | `ServiceMonitor` |
+| HAMi scheduler | `hami-scheduler:metrics` | `ServiceMonitor` |
+| HAMi device plugin | `hami-device-plugin:metrics` | `ServiceMonitor` |
+| OTel Collector | `:8888,:8889/metrics` | `ServiceMonitor` |
+| Jaeger | `:14269/metrics` | `ServiceMonitor` |
+
+### 7.3 Bundled Grafana dashboards
+
+Auto-imported via the Grafana sidecar from `charts/qsint-platform/files/dashboards/`:
+
+1. **QSINT — HAMi vGPU Per-Pod** — vRAM and compute share per pod, GPU temp/power, allocation table.
+2. **QSINT — vLLM Inference** — active/queued requests, TTFT / TPOT percentiles, KV-cache utilisation.
+3. **QSINT — LiteLLM Gateway** — request rate, error rate, p95 latency per model, token usage.
+
+### 7.4 Langfuse vs Jaeger — when to use which
+
+| Question | Tool |
+|---|---|
+| *Which prompt did model X get at 14:32?* | Langfuse |
+| *Where did the 5 s spent come from — routing, prefill, decode?* | Jaeger |
+| *Who spent the most tokens this week?* | Langfuse |
+| *Why is this single request 10× slower than the median?* | Jaeger (flame graph) |
+| *Compare Gemma vs SmolLM3 output for the same prompt.* | Langfuse (eval runs) |
+| *Is the bottleneck the proxy, vLLM prefill, or the network?* | Jaeger |
+
+They're complementary, not redundant.
+
+---
+
+## 8. Models deployed in this PoC
+
+| LiteLLM alias        | Backend            | HF model                                  | vRAM/RAM           |
+|----------------------|--------------------|-------------------------------------------|--------------------|
+| `gemma-1b-fast`      | vLLM (GPU/HAMi)    | `TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ`   | ~2.6 GB vRAM slice |
+| `smollm3-3b-quality` | vLLM (GPU/HAMi)    | `Qwen/Qwen2.5-0.5B-Instruct-AWQ`          | ~4.6 GB vRAM slice |
+| `qwen-3b-cpu`        | llama.cpp (CPU)    | `Qwen/Qwen2.5-3B-Instruct-GGUF` q4_k_m    | ~3 GB RAM          |
+
+The aliases are stable; underlying weights have been swapped to ungated
+public quants that fit the 10 GB RTX 3080 budget without an HF token.
+
+> **Note.** `Qwen/Qwen2.5-0.5B-Instruct-AWQ` ships without a tokenizer chat
+> template — the vLLM runtime auto-detects that and falls back to ChatML
+> (see [§5.3](#53-chat-template-fallback-in-the-vllm-runtime)).
+
+---
+
+## 9. Local UIs & credentials
+
+Run once on the workstation the browser will use:
 
 ```bash
 sudo ./scripts/update-local-hosts.sh
 ```
 
-This maps the local MicroK8s ingress hosts to `127.0.0.1`.
+Maps every `*.local.ro` ingress to `127.0.0.1`.
 
-| UI / endpoint | URI | Username / email | Password / key |
+| UI / endpoint | URL | Username | Secret retrieval |
 |---|---|---|---|
-| Argo CD | http://argocd.local.ro | `admin` | `XexABNTzC9IMf5S8` |
-| GitLab | http://gitlab.local.ro | `root` | `Uq6jF9veWolrYF3svwqyrJwS8cCYp9oeIOJEBrlMD5iiOaq7bh0j5aSZ6gfvz9Am` |
-| GitLab MinIO | http://minio.local.ro | `CVoEGEWWNmV6DtFyqCX4ij55w2WPhXuV3HSo5Eu9WqvhFDG1oPUOqQUecFesSd1B` | `NfiiFDSg9vOpVL4YYNrcf0esoxPh5y9dVS3jy11jSTgd37U518BykrLp4KWriJ0l` |
-| GitLab KAS | http://kas.local.ro | N/A | N/A |
-| Grafana | http://grafana.local.ro | `admin` | `admin` |
-| Open WebUI | http://open-webui.local.ro | Create first account in UI | Chosen during first signup |
-| Langfuse | http://langfuse.local.ro | Create first account in UI | Chosen during first signup |
-| Jaeger | http://jaeger.local.ro | N/A | N/A |
-| LiteLLM API / admin | http://litellm.local.ro | N/A | Bearer `sk-litellm-master-change-me` |
-
-Credential retrieval commands:
+| Argo CD | http://argocd.local.ro | `admin` | see below |
+| GitLab | http://gitlab.local.ro | `root` | see below |
+| GitLab MinIO | http://minio.local.ro | from `gitlab-minio-secret` | see below |
+| GitLab KAS | http://kas.local.ro | n/a (agent server) | n/a |
+| Grafana | http://grafana.local.ro | `admin` | see below |
+| Open WebUI | http://open-webui.local.ro | first signup becomes admin | chosen at signup |
+| Langfuse | http://langfuse.local.ro | first signup becomes admin | chosen at signup |
+| Jaeger | http://jaeger.local.ro | n/a | n/a |
+| LiteLLM API | http://litellm.local.ro | Bearer auth | `LITELLM_MASTER_KEY` |
 
 ```bash
 # Argo CD admin password
@@ -61,7 +734,7 @@ microk8s kubectl -n argocd get secret argocd-initial-admin-secret \
 microk8s kubectl -n gitlab get secret gitlab-initial-root-password \
   -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
 
-# GitLab MinIO access key and secret key
+# GitLab MinIO access key + secret
 microk8s kubectl -n gitlab get secret gitlab-minio-secret \
   -o go-template='{{"accesskey="}}{{index .data "accesskey" | base64decode}}{{"\nsecretkey="}}{{index .data "secretkey" | base64decode}}{{"\n"}}'
 
@@ -69,1123 +742,230 @@ microk8s kubectl -n gitlab get secret gitlab-minio-secret \
 microk8s kubectl -n observability get secret kube-prom-stack-grafana \
   -o go-template='{{index .data "admin-password" | base64decode}}{{"\n"}}'
 
-# LiteLLM bearer key
+# LiteLLM master key
 microk8s kubectl -n ai-platform get secret litellm-secrets \
   -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}{{"\n"}}'
 ```
 
 Notes:
 
-- Open WebUI and Langfuse do not have static chart-defined UI users. The first account created in each UI becomes the initial admin.
-- LiteLLM uses bearer-token auth: `Authorization: Bearer <LITELLM_MASTER_KEY>`.
-- Jaeger and GitLab KAS have no browser login in this PoC. KAS is the GitLab agent server endpoint, not a human UI.
-- PoC credentials are intentionally simple and stored in local Kubernetes secrets. Rotate every value before using this outside the local lab.
+- Open WebUI and Langfuse have no chart-defined users. **First account
+  created becomes admin.**
+- LiteLLM is bearer-auth: `Authorization: Bearer <LITELLM_MASTER_KEY>`.
+- Default master key is `sk-litellm-master-change-me` — **rotate before any
+  non-lab use.**
+- Jaeger and KAS have no human login. KAS is the GitLab Kubernetes agent
+  server, not a UI.
 
 ---
 
-## 1. Scop și context
+## 10. Prerequisites
 
-### 1.1 Ce face acest PoC
+### Hardware
 
-Reproduce experiența de developer din slide-urile AWS pentru on-prem cu un singur GPU consumer (RTX 3080 10GB). Un developer face `git push workloads/new-model.yaml` și în câteva minute modelul e live, scalabil, observabil, accesibil prin chat UI.
+- Linux node with an NVIDIA GPU (Ampere or newer, ≥ 10 GB vRAM).
+- 32 GB+ RAM recommended.
+- 100 GB+ free disk for the model cache PVC.
 
-Workflow complet:
+### Node software
 
-```
-git push                                  ← developer action
-   ↓
-ArgoCD detectează modificare              ← GitOps sync
-   ↓
-KRO expandează InferenceEndpoint CR       ← abstraction layer
-   ↓
-KServe creează Deployment + Service       ← serving infrastructure
-   ↓
-HAMi scheduler plasează pod pe vGPU       ← GPU sharing
-   ↓
-vLLM descarcă model din HuggingFace       ← model loading
-   ↓
-Job înregistrează model în LiteLLM        ← gateway registration
-   ↓
-Model apare în Open WebUI                 ← user access
-```
-
-### 1.2 Ce NU face
-
-- **Producție-ready.** Master keys hardcodate, fără mTLS, single replica pentru servicii critice. Vezi secțiunea [Production hardening checklist](#13-production-hardening-checklist).
-- **Distributed inference (multi-GPU tensor parallelism).** PoC-ul rulează single-GPU. Pentru TP=4 pe H200 cluster, vezi [Path către prod cu L40S](#14-path-către-prod-cu-l40s).
-- **Custom model training/fine-tuning.** Doar serving.
-
-### 1.3 De ce există
-
-Trei motive principale:
-
-**Învățare/PoC tehnologic.** Validarea că KRO + KServe + HAMi + LiteLLM + Open WebUI + Langfuse + Jaeger funcționează coerent ca stack on-prem. Slide-urile AWS sunt EKS-centric (Karpenter, ACK, etc.) — trebuie demonstrat că logica e portabilă on-prem cu echivalente open-source.
-
-**Foundation pentru QSINT.** Stack-ul ăsta e direct aplicabil pentru QSINT RAG/NER/IOC workloads când ajungi la L40S/H200 hardware. Decizia arhitecturală (KServe vs Ray, HAMi vs MIG, single gateway vs direct routing) trebuie validată empiric înainte de prod.
-
-**Self-service developer experience.** O dată setup-ul ridicat, echipa adaugă modele noi prin commit la `workloads/`, fără să atingă infra. Asta scalează team-ul.
-
----
-
-## 2. Decizii arhitecturale
-
-Fiecare decizie e justificată cu trade-offs și alternative respinse.
-
-### 2.1 KServe (RawDeployment mode) în loc de Ray Serve
-
-| Aspect | Alegere | Motivare |
-|---|---|---|
-| Serving runtime | KServe RawDeployment | Single-GPU = no need for Ray's distributed inference. KServe oferă HPA standard + custom ServingRuntime pattern curat. |
-| Mode | RawDeployment (no Knative) | vLLM cold-start 60-300s face scale-to-zero impractic. Knative adaugă queue-proxy + Istio dependency. |
-| vLLM ServingRuntime | Custom | KServe nu vine cu vLLM built-in (are TGI, Triton, MLServer). Definim noi un ClusterServingRuntime. |
-
-**Alternative respinse:**
-
-- **Ray Serve + KubeRay.** Overkill pentru single-GPU. Necesar doar când faci TP across multiple GPUs sau ai pipeline-uri complexe de modele. Re-evaluabil când treci la H200 multi-GPU.
-- **vLLM direct ca Deployment, fără KServe.** Pierzi abstraction layer + autoscaling integration + standard inference protocol.
-- **Triton Inference Server.** Mai mature, dar mai complex de configurat pentru OpenAI-compatible API. vLLM e mai simplu pentru LLM-specific use cases.
-
-### 2.2 HAMi pentru GPU sharing
-
-| Aspect | Alegere | Motivare |
-|---|---|---|
-| GPU sharing | HAMi vRAM partitioning | Singura opțiune cu izolare reală de vRAM pe RTX 3080 (consumer GPU). |
-
-**Alternative respinse:**
-
-- **NVIDIA time-slicing.** Zero izolare de memorie — un pod care alocă 9GB OOM-uiește restul. Nepotrivit pentru inference servere persistente.
-- **MIG.** Nu funcționează pe RTX 3080 (A100/H100/L40S+ only). Pentru viitorul L40S, MIG + HAMi hybrid e setup-ul recomandat (vezi secțiunea 14).
-- **MPS (Multi-Process Service).** Bună pentru latență dar fără izolare vRAM. Complex de setup în K8s.
-
-### 2.3 KRO pentru abstracție
-
-| Aspect | Alegere | Motivare |
-|---|---|---|
-| Abstraction layer | KRO ResourceGraphDefinition | CRD first-class. Status aggregation automată. Schema typed. |
-
-**Alternative respinse:**
-
-- **Helm chart cu values.yaml.** Templating, nu CRD. Lipsește controller-loop reconciliation.
-- **Crossplane v2.** Mai mature, dar overhead semnificativ pentru un PoC. Re-evaluabil pentru prod.
-- **Custom operator în Go (Kubebuilder).** Maximum control, dar săptămâni de dezvoltare în plus.
-
-**Risk acceptat:** KRO e alpha (v1alpha1). API-ul poate schimba. Pentru prod, re-evaluează în 6 luni.
-
-### 2.4 PostgreSQL shared pentru LiteLLM + Langfuse
-
-Un singur instance PostgreSQL cu două baze de date logice. Pattern "Platform DB" din slide-urile AWS.
-
-**Alternative respinse:**
-
-- **PostgreSQL separat per serviciu.** Resource overhead pe homelab. OK pentru prod.
-- **SQLite în-process.** Nu suportă multi-replica. LiteLLM HPA-scaled cere shared DB.
-
-### 2.5 LiteLLM ca single gateway
-
-Toate request-urile trec prin LiteLLM, indiferent de backend (vLLM local, OpenAI, Anthropic). Avantaje: budget per team, virtual keys, unified callbacks (Langfuse + OTel), A/B testing prin alias swap.
-
-**Risk acceptat:** SPOF + latency overhead (~10-20ms). Mitigation prin HPA + 2+ replicas în prod.
-
-### 2.6 OTel Collector vs direct-to-Jaeger
-
-OTel Collector centralizat. Best practice OpenTelemetry — clienții emit OTLP la collector, collector routeaza la backend(s).
-
-**Avantaje:**
-- Schimbi backend (Tempo, Datadog, Honeycomb) fără să atingi clienții
-- `k8sattributes` processor enrich spans cu pod/namespace/node
-- Memory limiter previne OOM la spike
-- Tail sampling possible (ex: keep 100% errors, 10% successes)
-
-**Alternative respinse:**
-
-- **Direct OTLP la Jaeger.** Tight coupling. Schimbare backend = redeploy peste tot.
-- **Jaeger Agent (deprecated).** Modelul vechi pre-OTel.
-
-### 2.7 Jaeger all-in-one pentru PoC
-
-Single pod cu collector + query UI + in-memory storage. Ușor de demonstrat, trace-uri se pierd la restart.
-
-**Pentru prod (QSINT):** Jaeger Production cu Elasticsearch backend, reused ES-ul tău existent QSINT. Sau migrate la Grafana Tempo (mai modern, dar nu există încă în stack-ul tău).
-
-### 2.8 Monorepo GitOps cu două ArgoCD Applications
-
-Repo unic cu `platform/`, `kro-templates/`, `workloads/`. Două Applications: `platform` (infra), `workloads` (modele). Sync waves asigură ordinea (`platform` primul, apoi `workloads`).
-
-**Alternative respinse:**
-
-- **Două repo-uri separate.** Strict separation of concerns, dar overhead de cross-repo coord.
-- **App-of-Apps cu ApplicationSet.** Mai elegant la scale, overkill pentru 2 modele PoC. Evolve to this when 10+ models.
-
----
-
-## 3. High-Level Design (HLD)
-
-### 3.1 Diagrama de ansamblu
-
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│                      User Plane                                       │
-│                                                                       │
-│   ┌──────────────────┐     ┌──────────────────┐                       │
-│   │   Developer      │     │   End User       │                       │
-│   │   git push       │     │   Browser        │                       │
-│   └────────┬─────────┘     └────────┬─────────┘                       │
-└────────────┼───────────────────────┼──────────────────────────────────┘
-             │                       │
-             ▼                       ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                      GitOps Plane                                     │
-│                                                                       │
-│   ┌──────────────┐         ┌──────────────────────────────────────┐   │
-│   │  GitHub      │◄────────┤  ArgoCD                              │   │
-│   │  Repo        │  sync   │  - Application "platform"            │   │
-│   │              │         │  - Application "kro-templates"       │   │
-│   │  platform/   │         │  - Application "workloads"           │   │
-│   │  workloads/  │         └──────────────────────────────────────┘   │
-│   └──────────────┘                          │                         │
-└─────────────────────────────────────────────┼─────────────────────────┘
-                                              │
-                                              ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                      Control Plane                                    │
-│                                                                       │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
-│   │  KRO         │  │  KServe      │  │  HAMi        │                │
-│   │  Controller  │  │  Controller  │  │  Scheduler   │                │
-│   └──────────────┘  └──────────────┘  └──────────────┘                │
-│                                                                       │
-│                              expands / schedules                      │
-└───────────────────────────────────────────────┬───────────────────────┘
-                                                │
-                                                ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                      Data Plane                                       │
-│                                                                       │
-│   ┌────────────────┐   ┌────────────────┐   ┌──────────────────┐      │
-│   │ vLLM Pod       │   │ vLLM Pod       │   │ LiteLLM Proxy    │      │
-│   │ gemma-1b       │   │ smollm3-3b     │   │  /v1/models      │      │
-│   │ vGPU 5GB       │   │ vGPU 5GB       │   │  /v1/chat/...    │      │
-│   └────────────────┘   └────────────────┘   └──────────────────┘      │
-│            └───────────────┬───────┘                  │               │
-│                            │                          │               │
-│                  Physical GPU: RTX 3080 10GB          │               │
-│                                                       ▼               │
-│   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐    │
-│   │  Open WebUI      │  │  Langfuse        │  │  Jaeger UI       │    │
-│   │  (chat)          │  │  (LLM traces)    │  │  (dist. traces)  │    │
-│   └──────────────────┘  └──────────────────┘  └──────────────────┘    │
-│                                                                       │
-│   Supporting:                                                         │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐    │
-│   │  PostgreSQL  │  │  Prometheus  │  │  OTel Collector          │    │
-│   │  (shared)    │  │  + Grafana   │  │  (OTLP fan-out)          │    │
-│   └──────────────┘  └──────────────┘  └──────────────────────────┘    │
-└───────────────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 Mapping pe namespace-uri Kubernetes
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  namespace: argocd                                      │
-│  └─ ArgoCD itself + Applications                        │
-├─────────────────────────────────────────────────────────┤
-│  namespace: kserve                                      │
-│  └─ KServe controller + webhook                         │
-├─────────────────────────────────────────────────────────┤
-│  namespace: kro-system                                  │
-│  └─ KRO controller + ResourceGraphDefinitions           │
-├─────────────────────────────────────────────────────────┤
-│  namespace: hami-system                                 │
-│  └─ HAMi scheduler + device plugin DaemonSet            │
-├─────────────────────────────────────────────────────────┤
-│  namespace: inference                                   │
-│  ├─ InferenceEndpoint CRs (gemma-1b, smollm3-3b)        │
-│  ├─ KServe InferenceServices (auto-created by KRO)      │
-│  ├─ vLLM pods (auto-created by KServe)                  │
-│  ├─ Registration Jobs (auto-created by KRO)             │
-│  └─ Shared model-cache PVC                              │
-├─────────────────────────────────────────────────────────┤
-│  namespace: ai-platform                                 │
-│  ├─ LiteLLM proxy                                       │
-│  ├─ Open WebUI                                          │
-│  ├─ Langfuse                                            │
-│  ├─ PostgreSQL (shared)                                 │
-│  ├─ OTel Collector                                      │
-│  └─ Jaeger all-in-one                                   │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 3.3 Data flow — un request de inference complet
-
-```
-1. User în Open WebUI: "Explain Kubernetes"
-   │
-   │  POST /v1/chat/completions
-   │  Authorization: Bearer sk-litellm-master-...
-   │  { "model": "gemma-1b-fast", "messages": [...] }
-   ▼
-2. LiteLLM Proxy (ai-platform/litellm:4000)
-   │  - Lookup "gemma-1b-fast" în PostgreSQL → găsește vLLM endpoint
-   │  - Inject traceparent header (W3C Trace Context)
-   │  - Forward la backend
-   ▼
-3. vLLM Pod (inference/gemma-1b-predictor:8000)
-   │  - Extract traceparent → continue span
-   │  - Tokenize input
-   │  - Inference pe vGPU (5GB slice din RTX 3080)
-   │  - Stream tokens înapoi
-   ▼
-4. LiteLLM Proxy
-   │  - Async: emit OTLP span la otel-collector:4317
-   │  - Async: emit Langfuse trace
-   │  - Return response la Open WebUI
-   ▼
-5. Open WebUI render în UI
-
-Parallel:
-6. OTel Collector
-   │  - Receive spans de la LiteLLM + vLLM
-   │  - Enrich cu k8sattributes (pod, namespace, node)
-   │  - Batch (5s window)
-   │  - Forward la Jaeger
-   ▼
-7. Jaeger
-   │  - Index spans
-   │  - Available în UI :30686
-```
-
----
-
-## 4. Low-Level Design (LLD)
-
-### 4.1 InferenceEndpoint CRD — expandare KRO
-
-Când developer face `kubectl apply` la:
-
-```yaml
-apiVersion: kro.run/v1alpha1
-kind: InferenceEndpoint
-metadata:
-  name: gemma-1b
-  namespace: inference
-spec:
-  model: "google/gemma-3-1b-it"
-  gpuMemMb: 5000
-  ...
-```
-
-KRO controller-ul detectează CR-ul și aplică `ResourceGraphDefinition inference-endpoint`. Rezultatul:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  ResourceGraphDefinition: inference-endpoint                    │
-│  generates 2 child resources:                                   │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ├─ Resource #1: KServe InferenceService
-        │    apiVersion: serving.kserve.io/v1beta1
-        │    metadata:
-        │      name: gemma-1b
-        │      annotations:
-        │        serving.kserve.io/deploymentMode: RawDeployment
-        │        serving.kserve.io/autoscalerClass: hpa
-        │    spec:
-        │      predictor:
-        │        minReplicas: 1
-        │        maxReplicas: 1
-        │        model:
-        │          modelFormat: { name: vllm }
-        │          runtime: vllm-runtime
-        │          env:
-        │            - MODEL_ID: google/gemma-3-1b-it
-        │            - SERVED_NAME: gemma-1b
-        │            - QUANTIZATION: awq
-        │            - MAX_MODEL_LEN: "2048"
-        │            - GPU_MEM_UTIL: "0.85"
-        │          resources:
-        │            limits:
-        │              nvidia.com/gpu: 1
-        │              nvidia.com/gpumem: "5000"
-        │              nvidia.com/gpucores: "50"
-        │
-        └─ Resource #2: Kubernetes Job (litellm register)
-             apiVersion: batch/v1
-             kind: Job
-             metadata:
-               name: gemma-1b-litellm-register
-             spec:
-               template:
-                 spec:
-                   containers:
-                     - image: curlimages/curl:8.10.1
-                       command:
-                         - sh
-                         - -c
-                         - |
-                           # Wait for vLLM endpoint readiness
-                           # POST /model/new on LiteLLM
-```
-
-KServe controller-ul preia InferenceService și creează:
-
-```
-InferenceService gemma-1b
-   │
-   ├─ Deployment: gemma-1b-predictor
-   │    spec:
-   │      replicas: 1
-   │      template:
-   │        spec:
-   │          schedulerName: hami-scheduler   ← critical pentru HAMi
-   │          containers:
-   │            - name: kserve-container
-   │              image: vllm/vllm-openai:v0.6.3
-   │              args: [--model=..., --quantization=awq, ...]
-   │              resources:
-   │                limits:
-   │                  nvidia.com/gpu: 1
-   │                  nvidia.com/gpumem: 5000
-   │
-   ├─ Service: gemma-1b-predictor (ClusterIP :80 → :8000)
-   │
-   └─ HPA: gemma-1b-predictor
-        scaleTargetRef → Deployment gemma-1b-predictor
-        minReplicas: 1, maxReplicas: 1
-```
-
-### 4.2 HAMi vGPU allocation — flow detaliat
-
-```
-1. Pod-ul gemma-1b-predictor e creat cu:
-   schedulerName: hami-scheduler
-   resources.limits.nvidia.com/gpumem: 5000
-
-2. kube-scheduler vede schedulerName != default → skip
-
-3. hami-scheduler:
-   - Listează GPU nodes (label gpu=true)
-   - Pentru fiecare GPU pe fiecare node:
-     - Calculează vRAM disponibilă (capacity - already allocated)
-     - Verifică dacă 5000MB încape
-   - Selectează nodul + GPU UUID + slot
-
-4. hami-scheduler annotează pod-ul:
-   metadata.annotations:
-     hami.io/vgpu-devices-allocated: "GPU-abc-1:5000:50"
-
-5. Kubelet pe nodul ales:
-   - Cere nvidia.com/gpu de la HAMi device plugin
-   - Device plugin injectează:
-     - NVIDIA_VISIBLE_DEVICES=GPU-abc-1
-     - LD_PRELOAD=/usr/local/vgpu/libvgpu.so
-     - CUDA_DEVICE_MEMORY_LIMIT=5368709120  (5GB)
-
-6. Container pornește vLLM:
-   - libvgpu.so se attaching la CUDA driver calls
-   - cuMemAlloc(size) → check against CUDA_DEVICE_MEMORY_LIMIT
-   - Dacă size + already_alloc > limit → return CUDA_ERROR_OUT_OF_MEMORY
-   - Altfel → forward la real CUDA driver
-```
-
-### 4.3 Observability flow — un trace end-to-end
-
-```
-1. Client request → LiteLLM
-   │  HTTP POST /v1/chat/completions
-   │
-   ▼
-2. LiteLLM Python middleware:
-   │  - opentelemetry-instrumentation-fastapi creates root span
-   │  - span: "POST /v1/chat/completions"
-   │    attributes:
-   │      http.method=POST
-   │      http.target=/v1/chat/completions
-   │      llm.model=gemma-1b-fast
-   │
-   ▼
-3. LiteLLM router determine target:
-   │  - child span: "litellm.routing"
-   │    attributes:
-   │      target_url=http://gemma-1b-predictor.inference.svc:80
-   │
-   ▼
-4. LiteLLM HTTP call → vLLM:
-   │  - child span: "POST gemma-1b-predictor"
-   │  - INJECT W3C traceparent header:
-   │    traceparent: 00-{trace_id}-{span_id}-01
-   │
-   ▼
-5. vLLM Python middleware:
-   │  - EXTRACT traceparent → become child of LiteLLM span
-   │  - root span: "vllm.chat_completion"
-   │    attributes:
-   │      llm.model=gemma-1b
-   │      llm.prompt_tokens=42
-   │      llm.completion_tokens=128
-   │      llm.gen.first_token_ms=120
-   │
-   ▼
-6. Both LiteLLM and vLLM async export to:
-   │  http://otel-collector.ai-platform.svc:4317 (OTLP/gRPC)
-   │
-   ▼
-7. OTel Collector:
-   │  - receivers.otlp ← receives spans
-   │  - processors.k8sattributes ← enrich:
-   │    k8s.pod.name=gemma-1b-predictor-abc
-   │    k8s.namespace.name=inference
-   │    k8s.node.name=node-gpu-01
-   │  - processors.batch ← batches 512 spans / 5s
-   │  - exporters.otlp/jaeger → forward
-   │
-   ▼
-8. Jaeger Collector:
-   │  - stores spans in-memory
-   │  - indexes by service.name, operation, trace_id
-   │
-   ▼
-9. Jaeger Query UI (http://node:30686):
-   │  - Search by service "litellm-proxy"
-   │  - View trace tree:
-   │    litellm-proxy / POST /v1/chat/completions  [340ms]
-   │      ├─ litellm-proxy / litellm.routing      [2ms]
-   │      └─ litellm-proxy / POST gemma-1b-pred   [336ms]
-   │          └─ vllm-inference / vllm.chat_comp  [330ms]
-```
-
-### 4.4 LiteLLM model registration sequence
-
-Când KRO Job rulează după ce vLLM e ready:
-
-```
-Job: gemma-1b-litellm-register
-   │
-   1. Wait loop:
-   │    for i in 1..120:
-   │      curl -sf http://gemma-1b-predictor.inference.svc/v1/models
-   │      if success: break
-   │      sleep 10
-   │
-   2. POST către LiteLLM:
-   │    curl -X POST http://litellm.ai-platform.svc:4000/model/new \
-   │      -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-   │      -d '{
-   │        "model_name": "gemma-1b-fast",
-   │        "litellm_params": {
-   │          "model": "openai/gemma-1b",
-   │          "api_base": "http://gemma-1b-predictor.inference.svc/v1",
-   │          "api_key": "dummy"
-   │        },
-   │        "model_info": {
-   │          "id": "gemma-1b",
-   │          "description": "google/gemma-3-1b-it via KServe + vLLM"
-   │        }
-   │      }'
-   │
-   3. LiteLLM:
-   │    - Validate request (master key)
-   │    - INSERT INTO model_table ...
-   │    - Reload internal router config
-   │    - Return 200 OK
-   │
-   4. Job exits 0 → completed
-```
-
----
-
-## 5. Componente — detaliat
-
-### 5.1 ArgoCD
-
-**Rol:** GitOps engine. Watch GitHub repo, reconciliază cluster state cu manifest state.
-
-**Topologie:**
-
-```
-ArgoCD Applications:
-  1. platform          → sync platform/ subdirectory
-                        Sync wave 0 (after CRDs)
-                        Auto-sync, prune, self-heal
-
-  2. kro-templates     → sync kro-templates/ subdirectory
-                        Sync wave 0 (parallel cu platform)
-                        Conține RGDs
-
-  3. workloads         → sync workloads/ subdirectory
-                        Sync wave 1 (after platform ready)
-                        Conține InferenceEndpoint CRs
-```
-
-**Sync waves:** Asigură că InferenceEndpoint CR-urile (wave 1) sunt aplicate doar după ce CRD-urile sunt înregistrate (wave 0).
-
-### 5.2 KRO (Kube Resource Orchestrator)
-
-**Rol:** Definește CRD-uri high-level care expandează în multiple K8s objects.
-
-**Componente:**
-- Controller manager (Deployment în `kro-system`)
-- CRDs: `ResourceGraphDefinition`
-
-**Cum funcționează:**
-1. Aplici un `ResourceGraphDefinition` care declară:
-   - Schema CRD-ului nou (ex: `InferenceEndpoint`)
-   - Lista de resurse pe care le expandează
-   - Mapping între câmpurile CRD-ului și fiecare resursă
-2. KRO controller înregistrează noua CRD via Kubernetes API
-3. Când cineva creează o instanță (ex: `InferenceEndpoint gemma-1b`), KRO controller-ul detectează și creează toate resursele copil
-
-**Concepte cheie:**
-- **Schema** — declararea tipului CRD-ului expus utilizatorului
-- **Resources** — lista de K8s objects care vor fi create
-- **CEL expressions** (`${schema.spec.foo}`) — substituție de valori din CR la resursele expandate
-
-### 5.3 KServe
-
-**Rol:** Abstracție pentru model serving. Un `InferenceService` = un model deployat.
-
-**Componente:**
-- Controller manager
-- Webhook (validation + defaulting)
-- `ServingRuntime` și `ClusterServingRuntime` CRDs
-- `InferenceService` CRD
-
-**Mode RawDeployment:**
-
-```
-InferenceService ←─── creates ─── KServe Controller
-       │
-       ├─ Deployment (managed)
-       │    └─ Pods
-       ├─ Service (ClusterIP)
-       └─ HPA (if autoscaling enabled)
-```
-
-**Custom ServingRuntime pentru vLLM:**
-
-Definește cum se rulează un model `modelFormat: vllm`. Containerul, args, env vars, resource defaults, probes. Toate InferenceServices care folosesc `runtime: vllm-runtime` moștenesc această configurație, suprascrise selectiv prin spec-ul fiecărui IS.
-
-### 5.4 HAMi
-
-**Rol:** GPU virtualization software-based. Permite multiple pod-uri să share același GPU fizic cu izolare de vRAM și compute.
-
-**Componente:**
-
-```
-hami-system namespace:
-  - hami-scheduler (Deployment)
-      → custom Kubernetes scheduler
-      → only schedules pods cu schedulerName: hami-scheduler
-
-  - hami-scheduler-extender (Deployment)
-      → webhook pentru kube-scheduler integration
-      → optional, depinde de installation mode
-
-  - hami-device-plugin (DaemonSet)
-      → runs pe orice node cu label gpu=true
-      → advertises nvidia.com/gpu, gpumem, gpucores
-      → injects libvgpu.so în pods via environment
-
-  - hami-webhook (Deployment, optional)
-      → mutating webhook
-      → auto-adds schedulerName: hami-scheduler la pods care
-        cer resurse nvidia.com/gpumem
-```
-
-**Resource model:**
-
-| Resource | Unit | Description |
-|---|---|---|
-| `nvidia.com/gpu` | count | Număr de vGPU logice (1 per pod, default) |
-| `nvidia.com/gpumem` | MB | Hard limit pe vRAM |
-| `nvidia.com/gpucores` | % | Compute share garantat (soft limit) |
-
-### 5.5 vLLM ClusterServingRuntime
-
-**Definit în** `platform/kserve/vllm-servingruntime.yaml`.
-
-**Caracteristici:**
-- Image: `vllm/vllm-openai:v0.6.3`
-- OpenAI-compatible API pe port 8000
-- AWQ quantization support
-- `--enable-prefix-caching` (RadixAttention)
-- `--otlp-traces-endpoint` pentru distributed tracing
-- `schedulerName: hami-scheduler` (critical!)
-- HuggingFace token via Secret reference (pentru gated models)
-- Shared PVC pentru model cache
-
-**Args parametrizate** (suprascrise per IS):
-```
---model=$(MODEL_ID)
---served-model-name=$(SERVED_NAME)
---quantization=$(QUANTIZATION)
---max-model-len=$(MAX_MODEL_LEN)
---gpu-memory-utilization=$(GPU_MEM_UTIL)
-```
-
-### 5.6 LiteLLM Proxy
-
-**Rol:** Unified OpenAI-compatible gateway peste orice backend (local vLLM, OpenAI, Anthropic, Bedrock, Azure).
-
-**Capabilități folosite:**
-- Model routing prin alias (`gemma-1b-fast` → `openai/gemma-1b` la endpoint local)
-- Master key authentication (`/model/new` admin API)
-- PostgreSQL backend (persistent model list)
-- Callbacks: Langfuse + OTel
-- Prometheus metrics
-
-**Înregistrare model:** Prin POST `/model/new` cu master key. Făcut automat de KRO Job după ce vLLM e ready.
-
-### 5.7 Open WebUI
-
-**Rol:** Chat UI. Conectat la LiteLLM ca backend OpenAI-compatible.
-
-**Configurare cheie:**
-```yaml
-OPENAI_API_BASE_URL: http://litellm.ai-platform.svc.cluster.local:4000/v1
-OPENAI_API_KEY: <litellm-master-key>
-```
-
-Open WebUI listează automat modelele din `/v1/models` și le afișează în dropdown.
-
-### 5.8 Langfuse
-
-**Rol:** LLM-specific observability. Spre deosebire de Jaeger (generic distributed tracing), Langfuse e specializat: prompt/completion logging, token usage, cost, evaluation runs.
-
-**Componente:**
-- Web UI + API server (Next.js)
-- PostgreSQL backend (shared cu LiteLLM)
-
-**Wire-up:** LiteLLM are `langfuse` în `success_callback`. Trimite async (non-blocking) detalii despre fiecare completion.
-
-### 5.9 PostgreSQL (shared)
-
-**Rol:** Storage shared pentru LiteLLM și Langfuse. Pattern "Platform DB".
-
-**Setup:**
-- StatefulSet single-replica
-- Init script creează baze: `litellm`, `langfuse`
-- Credentials în K8s Secret
-
----
-
-## 6. Observability stack
-
-### 6.1 Triada observabilității
-
-| Pillar | Tool | Ce captează | Acces |
-|---|---|---|---|
-| **Metrics** | Prometheus + Grafana | Throughput, latency, vRAM, cost | Grafana :3000 (în monitoring ns) |
-| **Traces** | OTel Collector + Jaeger | Request flow LiteLLM → vLLM | Jaeger UI :30686 |
-| **Logs** | (your existing Loki) | Stdout/stderr containere | Loki/Kibana |
-| **LLM-specific** | Langfuse | Prompt/completion details, eval | :30030 |
-
-### 6.2 Metrics — surse și dashboards
-
-**Surse de metrici:**
-
-| Sursă | Endpoint | Cum se scrapează |
-|---|---|---|
-| vLLM pods | `:8000/metrics` | PodMonitor `vllm-inference-pods` |
-| LiteLLM | `litellm:4000/metrics` | ServiceMonitor `litellm` |
-| HAMi scheduler | `hami-scheduler:metrics` | ServiceMonitor `hami-scheduler` |
-| HAMi device plugin | `hami-device-plugin:metrics` | ServiceMonitor `hami-device-plugin` |
-| OTel Collector | `:8888/metrics` + `:8889/metrics` | ServiceMonitor `otel-collector` |
-| Jaeger | `:14269/metrics` | ServiceMonitor `jaeger` |
-
-**Grafana dashboards (auto-imported via ConfigMap sidecar):**
-
-1. **QSINT — HAMi vGPU Per-Pod**
-   - Total vRAM utilization (RTX 3080)
-   - Pods active using vGPU
-   - GPU temperature, power
-   - vRAM usage per pod (stacked timeseries)
-   - Compute % per pod
-   - Tabel allocation snapshot
-
-2. **QSINT — vLLM Inference**
-   - Active requests, queued requests, KV cache %
-   - Token throughput per model
-   - TTFT (Time To First Token) p50/p95/p99
-   - TPOT (Time Per Output Token) p50/p95
-   - KV cache + CPU cache utilization
-
-3. **QSINT — LiteLLM Gateway**
-   - Total request rate
-   - Error rate (5m)
-   - p95 latency
-   - Request rate per model
-   - Latency percentiles per model
-   - Token usage (input + output stacked)
-   - Per-model summary table
-
-### 6.3 Distributed tracing flow
-
-```
-┌──────────────┐ OTLP/gRPC  ┌──────────────────┐ OTLP/gRPC  ┌─────────┐
-│ LiteLLM      │───────────►│ OTel Collector   │───────────►│ Jaeger  │
-│ Proxy        │            │                  │            │ all-in- │
-└──────────────┘            │  pipelines:      │            │ one     │
-                            │   traces:        │            └─────────┘
-┌──────────────┐ OTLP/gRPC  │    receivers     │
-│ vLLM Pods    │───────────►│      [otlp]      │
-│ (gemma-1b)   │            │    processors    │            ┌─────────┐
-└──────────────┘            │      memory_lim  │            │ Grafana │
-                            │      k8sattribs  │            │  scrape │
-┌──────────────┐ OTLP/gRPC  │      resource    │◄───────────┤  via    │
-│ vLLM Pods    │───────────►│      batch       │            │  /:8889 │
-│ (smollm3-3b) │            │    exporters     │            └─────────┘
-└──────────────┘            │      [otlp/jaeg] │
-                            │      [prometheus]│
-                            │      [debug]     │
-                            └──────────────────┘
-```
-
-**Span attributes (după k8sattributes processor):**
-
-Fiecare span e îmbogățit cu:
-- `k8s.namespace.name`
-- `k8s.pod.name`
-- `k8s.pod.uid`
-- `k8s.deployment.name`
-- `k8s.node.name`
-- Pod labels: `app`, `serving.kserve.io/inferenceservice`
-- Resource: `service.name`, `service.namespace`, `deployment.environment=poc`
-
-### 6.4 Langfuse vs Jaeger — când care
-
-| Use case | Tool |
+| Component | Tested version |
 |---|---|
-| "Care a fost prompt-ul exact pe care l-a primit modelul X la 14:32?" | Langfuse |
-| "Cum se distribuie latența între network, LiteLLM routing, vLLM prefill, vLLM decode?" | Jaeger |
-| "Care request-uri au costat cei mai mulți tokens săptămâna asta?" | Langfuse |
-| "De ce request-ul ăsta a durat 5 secunde când majoritatea durează 1s?" | Jaeger (flame graph) |
-| "Compară output-ul Gemma vs SmolLM3 pe același prompt." | Langfuse (evaluation runs) |
-| "Care e bottleneck-ul: LiteLLM, vLLM, sau networking?" | Jaeger |
+| MicroK8s | 1.28+ (`microk8s helm3` enabled) |
+| NVIDIA driver | 535+ |
+| nvidia-container-toolkit | latest |
+| containerd | 1.7+ with `nvidia` runtime set as default |
 
-Complementare, nu redundante.
+### Cluster expectations
 
----
-
-## 7. Prerequisites
-
-### 7.1 Hardware
-
-- Kubernetes node cu GPU NVIDIA (Ampere+, minim 10GB VRAM)
-- Recomandat: 32GB+ RAM pe nodul GPU
-- 100GB+ storage pentru model cache
-
-### 7.2 Software pe node-uri
-
-| Component | Versiune testată |
-|---|---|
-| Kubernetes | 1.28+ |
-| NVIDIA Driver | 535+ |
-| NVIDIA Container Toolkit | latest |
-| containerd | 1.7+ (cu nvidia runtime ca default) |
-
-### 7.3 Cluster components (instalate înainte)
-
-```bash
-# 1. ArgoCD
-kubectl create namespace argocd
-kubectl apply -n argocd -f \
-  https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-# 2. cert-manager (KServe dependency)
-helm repo add jetstack https://charts.jetstack.io
-helm install cert-manager jetstack/cert-manager \
-  --namespace cert-manager --create-namespace \
-  --set installCRDs=true
-
-# 3. kube-prometheus-stack (Prometheus + Grafana + operators)
-helm repo add prometheus-community \
-  https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --create-namespace \
-  --set grafana.sidecar.dashboards.enabled=true \
-  --set grafana.sidecar.dashboards.searchNamespace=ALL
-
-# 4. NFS provisioner (or any RWX storage)
-helm repo add nfs-subdir-external-provisioner \
-  https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
-helm install nfs-client nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
-  --namespace nfs-system --create-namespace \
-  --set nfs.server=<your-nfs-server> \
-  --set nfs.path=/path/to/nfs/share
-```
+- Single-node, node name `bogdan` (or update `scripts/deploy-microk8s.sh`).
+- The node must carry the label `gpu=on` (set by the script).
+- `*.local.ro` hostnames resolve to the node — use
+  `scripts/update-local-hosts.sh`.
 
 ---
 
-## 8. Tutorial: instalare pas cu pas
-
-### Pas 1: Fork repo & customize
+## 11. Install
 
 ```bash
-git clone https://github.com/YOUR_USER/qsint-ai-platform
-cd qsint-ai-platform
+# 1. Map local hostnames
+sudo ./scripts/update-local-hosts.sh
 
-# Update repo URL în Application manifests
-sed -i 's|github.com/bogdancstrike|github.com/YOUR_USER|g' \
-  platform/argocd/*.yaml
+# 2. Install the whole stack (idempotent — re-run = upgrade)
+./scripts/deploy-microk8s.sh
+
+# 3. (Optional) load a Hugging Face token for gated models
+microk8s kubectl create secret generic huggingface-token \
+  -n inference --from-literal=token=hf_xxx \
+  --dry-run=client -o yaml | microk8s kubectl apply -f -
 ```
 
-### Pas 2: Schimbă credentials (IMPORTANT)
+`scripts/deploy-microk8s.sh` is the canonical install. It:
 
-Edit aceste fișiere cu valori unice:
+1. Adds the upstream Helm repos.
+2. Removes any prior raw-installed namespaces/CRDs.
+3. Labels the GPU node.
+4. Runs `helm dependency update` for every chart.
+5. Installs releases in dependency order:
 
-```bash
-# 1. PostgreSQL password
-vim platform/postgresql/postgresql.yaml
-# Schimbă: POSTGRES_PASSWORD
+   ```text
+   cert-manager
+   kube-prometheus-stack
+   Argo CD
+   HAMi
+   KRO
+   KServe CRDs
+   KServe
+   GitLab
+   qsint-namespaces
+   qsint-platform
+   qsint-kro-templates
+   qsint-workloads
+   ```
 
-# 2. LiteLLM master key (TREBUIE să fie identic în 3 locuri)
-vim platform/litellm/litellm.yaml          # LITELLM_MASTER_KEY
-vim platform/kserve/litellm-secret-mirror.yaml  # LITELLM_MASTER_KEY
-vim platform/open-webui/open-webui.yaml    # OPENAI_API_KEY
-
-# 3. Langfuse secrets
-vim platform/langfuse/langfuse.yaml
-# Schimbă: NEXTAUTH_SECRET, ENCRYPTION_KEY (64 hex chars), SALT
-
-# 4. Open WebUI session key
-vim platform/open-webui/open-webui.yaml
-# Schimbă: WEBUI_SECRET_KEY
-
-git commit -am "customize credentials"
-git push
-```
-
-### Pas 3: Pre-create HuggingFace secret
-
-```bash
-# Get token din https://huggingface.co/settings/tokens
-# Accept Gemma license: https://huggingface.co/google/gemma-3-1b-it
-
-kubectl create namespace inference
-kubectl create secret generic huggingface-token \
-  -n inference \
-  --from-literal=token=hf_YOUR_TOKEN
-```
-
-### Pas 4: Label nodul GPU
-
-```bash
-kubectl label node <your-gpu-node> gpu=true
-```
-
-### Pas 5: Bootstrap ArgoCD Applications
-
-```bash
-kubectl apply -k platform/argocd/
-
-# Watch sync
-argocd app list
-argocd app sync platform
-argocd app sync kro-templates
-argocd app sync workloads
-```
-
-### Pas 6: Verifică stack-ul
-
-```bash
-# HAMi
-kubectl -n hami-system get pods
-kubectl describe node <gpu-node> | grep nvidia.com
-
-# KServe
-kubectl -n kserve get pods
-kubectl get clusterservingruntime vllm-runtime
-
-# KRO
-kubectl -n kro-system get pods
-kubectl get resourcegraphdefinitions
-kubectl get crd inferenceendpoints.kro.run
-
-# Models
-kubectl -n inference get inferenceendpoints
-kubectl -n inference get inferenceservices
-kubectl -n inference get pods
-
-# Wait pentru pod-uri să fie Ready (poate dura 10-15 min la cold start
-# pentru download model + warmup vLLM)
-kubectl -n inference wait --for=condition=Ready pod \
-  -l serving.kserve.io/inferenceservice=gemma-1b \
-  --timeout=900s
-
-# Platform services
-kubectl -n ai-platform get pods
-```
-
-### Pas 7: Wire-up Langfuse keys
-
-```bash
-# 1. Open Langfuse
-xdg-open http://<node-ip>:30030
-
-# 2. Sign up (devine admin)
-# 3. Create project: qsint-poc
-# 4. Settings → API Keys → Create
-# 5. Copy public key (pk-lf-...) și secret key (sk-lf-...)
-
-# 6. Patch LiteLLM secret
-kubectl -n ai-platform edit secret litellm-secrets
-# Update LANGFUSE_PUBLIC_KEY și LANGFUSE_SECRET_KEY (base64-encoded)
-
-# 7. Restart LiteLLM
-kubectl -n ai-platform rollout restart deploy/litellm
-```
-
-### Pas 8: Test end-to-end
-
-```bash
-# Port-forward LiteLLM
-kubectl -n ai-platform port-forward svc/litellm 4000:4000 &
-
-# List models
-curl http://localhost:4000/v1/models \
-  -H "Authorization: Bearer <LITELLM_MASTER_KEY>"
-
-# Send chat completion
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer <LITELLM_MASTER_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemma-1b-fast",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
-  }'
-
-# Open chat UI
-xdg-open http://<node-ip>:30080
-
-# View distributed traces
-xdg-open http://<node-ip>:30686
-
-# View LLM-specific traces
-xdg-open http://<node-ip>:30030
-
-# View Grafana dashboards
-xdg-open http://<node-ip>:<grafana-nodeport>
-# Login admin/admin
-# Browse Dashboards → QSINT folder
-```
+Expect 15–30 minutes the first time, mostly spent pulling images and the
+first model weights from Hugging Face.
 
 ---
 
-## 9. Tutorial: cum adaugi un model nou
+## 12. Add a new model
 
-Exemplu: adaug `Qwen2.5-7B-Instruct-AWQ`.
+End-to-end walk-through for `Qwen2.5-7B-Instruct-AWQ`:
 
 ```bash
-# 1. Crează fișier nou
-cat > workloads/qwen25-7b.yaml <<'EOF'
+# 1. Drop a new template
+cat > charts/qsint-workloads/templates/qwen25-7b.yaml <<'EOF'
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
   name: qwen25-7b
   namespace: inference
 spec:
+  backend: vllm
   model: "Qwen/Qwen2.5-7B-Instruct-AWQ"
   servedName: "qwen25-7b"
-
-  # Note: 7B AWQ ≈ 4.2GB weights + ~1.5GB KV cache + 1.5GB overhead = ~7GB
-  # Won't fit alongside both existing models on 10GB GPU.
-  # Either scale down existing models or use separate GPU node.
-  gpuMemMb: 8000
+  gpuMemMb: 8000          # ~7B AWQ + KV ≈ 7 GB; tight on 10 GB
+  gpuMemPercentage: 80
   gpuCorePercent: 80
-
   quantization: "awq"
   maxModelLen: 4096
   gpuMemUtilization: "0.85"
-
   cpuRequest: "2"
   cpuLimit: "4"
   memoryRequest: "8Gi"
   memoryLimit: "16Gi"
-
   minReplicas: 1
   maxReplicas: 1
-
   litellmAlias: "qwen25-7b-coder"
 EOF
 
-# 2. Commit + push
-git add workloads/qwen25-7b.yaml
-git commit -m "feat: add Qwen2.5-7B model"
-git push
+# 2. Add it to the LiteLLM registration list
+$EDITOR charts/qsint-workloads/templates/litellm-registration-jobs.yaml
+# append a dict to $models
 
-# 3. ArgoCD detectează (auto-sync within 3 min, sau force):
-argocd app sync workloads
+# 3. Apply (manual today, Argo CD post-bootstrap)
+./scripts/deploy-microk8s.sh
+# or just:
+microk8s helm3 upgrade --install qsint-workloads charts/qsint-workloads \
+  -n inference
 
-# 4. KRO expandează automat:
-kubectl -n inference get inferenceendpoint qwen25-7b -w
+# 4. Watch reconciliation
+microk8s kubectl -n inference get inferenceendpoint qwen25-7b -w
+microk8s kubectl -n inference get inferenceservices
 
-# 5. Verifică în LiteLLM după ce KServe IS e Ready:
-curl http://localhost:4000/v1/models -H "Authorization: Bearer ..."
-# Should list qwen25-7b-coder
-
-# 6. Open WebUI vede modelul automat în dropdown (refresh).
+# 5. Once Ready, the registration Job will POST to LiteLLM.
+#    The alias auto-appears in the LiteLLM /v1/models response and in
+#    Open WebUI's dropdown.
 ```
+
+**Sizing rules of thumb (RTX 3080 10 GB).**
+
+| Model size | Quant | Approx slice |
+|---|---|---|
+| 1B | AWQ INT4 | 2.5–3 GB |
+| 3B | AWQ INT4 | 4–5 GB |
+| 7B | AWQ INT4 | 7–8 GB |
+| 13B | AWQ INT4 | ≥ 12 GB — won't fit |
 
 ---
 
-## 10. Tutorial: cum verifici GPU sharing real
+## 13. Tests
 
-Whole point of HAMi e că două pod-uri share același GPU fizic cu izolare reală.
+End-to-end smoke test that hits LiteLLM for each of the three model aliases
+and confirms Open WebUI is reachable. Standard-library only — no pip install.
 
 ```bash
-# 1. Confirmă ambele pod-uri pe același nod
-kubectl -n inference get pods -o wide \
+LITELLM_KEY="$(microk8s kubectl -n ai-platform get secret litellm-secrets \
+  -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}')" \
+python3 tests/e2e_smoke.py
+```
+
+Optional flags / env vars (full list in [`tests/README.md`](tests/README.md)):
+
+- `LITELLM_URL` (default `http://litellm.local.ro`)
+- `OPEN_WEBUI_URL` (default `https://open-webui.local.ro`)
+- `TIMEOUT` (seconds, default 120)
+- `--junit out.xml` — write a JUnit report
+
+What it verifies:
+
+1. LiteLLM `/health/liveliness` (or `/health/readiness`) returns 200.
+2. `/v1/models` lists all three aliases.
+3. `/v1/chat/completions` returns a non-empty completion from each alias.
+4. Open WebUI is reachable (any 2xx/3xx counts as "up").
+
+---
+
+## 14. Verify GPU sharing
+
+The whole point of HAMi is two pods sharing one physical GPU **with real
+isolation**.
+
+```bash
+# 1. Confirm both GPU pods are on the same node
+microk8s kubectl -n inference get pods -o wide \
   -l 'serving.kserve.io/inferenceservice in (gemma-1b, smollm3-3b)'
 
-# Output expectat:
-# NAME                              READY   STATUS    NODE
-# gemma-1b-predictor-xyz            1/1     Running   gpu-node-01
-# smollm3-3b-predictor-abc          1/1     Running   gpu-node-01    ← acelasi nod
-
-# 2. Verifică schedulerName
-kubectl -n inference get pod gemma-1b-predictor-xyz \
+# 2. Verify each pod runs under the HAMi scheduler
+microk8s kubectl -n inference get pod <pod-name> \
   -o jsonpath='{.spec.schedulerName}'
-# Output: hami-scheduler   ← critic!
+# expected: hami-scheduler
 
-# 3. Inside pod, nvidia-smi arată DOAR vRAM-ul alocat
-kubectl -n inference exec deploy/gemma-1b-predictor -- nvidia-smi
-# Memory-Usage: ar trebui < 5000 MiB
+# 3. Inside the pod, nvidia-smi shows only the slice
+microk8s kubectl -n inference exec deploy/gemma-1b-predictor -- nvidia-smi
+# Memory-Usage: well under 5000 MiB
 
-# 4. Pe nodul fizic (sau via DCGM exporter), vezi DOUĂ procese
-ssh <gpu-node>
+# 4. On the node, two GPU processes coexist
+ssh <node>
 nvidia-smi
-# Process list ar trebui să arate 2x python (vllm) pe GPU 0
-# Total memory used: ~8-10GB (suma celor două vGPU slices)
+# Two python processes on GPU 0; combined memory ≈ 8–10 GB
 
-# 5. În Grafana, deschide "QSINT — HAMi vGPU Per-Pod" dashboard
-# Vezi DOUĂ linii distincte în "vRAM Usage per Pod (stacked)"
-# Fiecare cu vRAM-ul lor independent
+# 5. Grafana: open "QSINT — HAMi vGPU Per-Pod" → two distinct lines
+#    in the stacked vRAM-per-pod timeseries.
 
-# 6. Stress test pentru a confirma izolarea
-# Trimite request-uri concurente la ambele modele:
+# 6. Concurrent stress to confirm isolation
 for i in {1..10}; do
-  curl -s http://localhost:4000/v1/chat/completions \
-    -H "Authorization: Bearer ..." \
+  curl -s http://litellm.local.ro/v1/chat/completions \
+    -H "Authorization: Bearer $LITELLM_KEY" \
     -d '{"model":"gemma-1b-fast","messages":[{"role":"user","content":"Count to 100"}],"max_tokens":500}' &
-  curl -s http://localhost:4000/v1/chat/completions \
-    -H "Authorization: Bearer ..." \
+  curl -s http://litellm.local.ro/v1/chat/completions \
+    -H "Authorization: Bearer $LITELLM_KEY" \
     -d '{"model":"smollm3-3b-quality","messages":[{"role":"user","content":"Count to 100"}],"max_tokens":500}' &
 done
 wait
-
-# Grafana arată ambele modele răspunzând concurent, fără să-și fure resurse
 ```
+
+Grafana should show both models answering in parallel with neither starving
+the other's vRAM.
 
 ---
 
-## 11. Tutorial: cum citești distributed traces în Jaeger
+## 15. Read distributed traces in Jaeger
 
 ```bash
-# 1. Generează un request
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer ..." \
+# 1. Generate a request
+curl http://litellm.local.ro/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gemma-1b-fast",
@@ -1194,226 +974,205 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 
 # 2. Open Jaeger UI
-xdg-open http://<node-ip>:30686
-
-# 3. Search:
-#    Service: litellm-proxy
-#    Operation: POST /v1/chat/completions
-#    Lookback: Last 15 minutes
-#    Click "Find Traces"
-
-# 4. Click pe un trace → vezi waterfall:
-#    litellm-proxy: POST /v1/chat/completions          [340ms total]
-#    ├── litellm-proxy: litellm.routing                [2ms]
-#    └── litellm-proxy: HTTP POST gemma-1b-predictor   [336ms]
-#        └── vllm-inference: vllm.chat_completion      [330ms]
-#            ├── vllm.tokenize                          [3ms]
-#            ├── vllm.prefill                          [120ms]
-#            └── vllm.decode (50 tokens)                [205ms]
-
-# 5. Click pe orice span → vezi attributes:
-#    k8s.pod.name=gemma-1b-predictor-xyz
-#    k8s.namespace.name=inference
-#    k8s.node.name=gpu-node-01
-#    llm.model=gemma-1b
-#    llm.prompt_tokens=12
-#    llm.completion_tokens=50
-
-# 6. Compare traces pentru a identifica outliers:
-#    Click "Compare" cu 2 trace IDs
-#    Vezi differences în structura span tree
+xdg-open http://jaeger.local.ro
 ```
+
+In the UI:
+
+- Service: `litellm-proxy` → Operation: `POST /v1/chat/completions` → Find Traces.
+- Click a trace. You should see the waterfall from [§5.4](#54-distributed-tracing--end-to-end-span-tree).
+- Click any span to see attributes (`k8s.pod.name`, `llm.model`,
+  `llm.prompt_tokens`, …).
+- "Compare" two traces side-by-side to identify outliers.
 
 ---
 
-## 12. Troubleshooting
+## 16. Troubleshooting
 
-### Pod-ul nu pornește — `Insufficient nvidia.com/gpumem`
+### Pod stuck `Pending` — `Insufficient nvidia.com/gpumem`
 
 ```bash
-# Check HAMi allocatable
-kubectl describe node <gpu-node> | grep -A 5 Allocatable
-
-# Dacă vezi 0 gpumem, HAMi device plugin nu rulează:
-kubectl -n hami-system get pods -o wide
-kubectl -n hami-system logs -l app.kubernetes.io/name=hami-device-plugin
-
-# Probleme comune:
-# - Nodul nu are label gpu=true
-# - NVIDIA driver nu e instalat
-# - containerd nu are nvidia runtime
+microk8s kubectl describe node <node> | grep -A 5 Allocatable
+microk8s kubectl -n kube-system get pods -l app.kubernetes.io/name=hami
+microk8s kubectl -n kube-system logs -l app.kubernetes.io/name=hami-device-plugin
 ```
+
+Likely cause: HAMi device plugin not running. Check that the node has
+`gpu=on`, the NVIDIA driver is loaded, and containerd's default runtime is
+`nvidia`.
 
 ### vLLM hangs at startup
 
 ```bash
-kubectl -n inference logs -f deploy/gemma-1b-predictor
-
-# "OSError: model is gated" → HF token lipsește/invalid
-kubectl -n inference get secret huggingface-token -o yaml
-# Re-create cu token valid
-
-# "CUDA out of memory" → reduce gpu-memory-utilization
-# Edit InferenceEndpoint:
-kubectl -n inference edit inferenceendpoint gemma-1b
-# spec.gpuMemUtilization: "0.75"
-
-# "Connection timeout HuggingFace" → network issue
-# Check egress NetworkPolicy / firewall
+microk8s kubectl -n inference logs -f deploy/gemma-1b-predictor
 ```
 
-### Pod e Running dar nu apare în LiteLLM
+- `OSError: model is gated` — HF token missing/invalid. Recreate the
+  `huggingface-token` Secret.
+- `CUDA out of memory` — lower `spec.gpuMemUtilization` to `"0.75"` in the
+  workload, or raise `gpuMemMb`.
+- `Connection timeout to Hugging Face` — egress firewall/NetworkPolicy.
+
+### Pod is `Ready` but doesn't appear in LiteLLM
 
 ```bash
-# Check registration job
-kubectl -n inference get jobs
-kubectl -n inference logs job/gemma-1b-litellm-register
+microk8s kubectl -n inference get jobs
+microk8s kubectl -n inference logs job/<model>-litellm-register
+```
 
-# Probleme comune:
-# - LITELLM_MASTER_KEY mismatch între litellm-secrets și mirror
-# - LiteLLM pod not ready when job ran
-# - Network policy blocking
+- Most often: `LITELLM_MASTER_KEY` mismatch between `litellm-secrets` (in
+  `ai-platform`) and the mirror in `inference`.
+- LiteLLM pod was not Ready when the Job ran — re-create the Job.
 
-# Re-run job manual:
-kubectl -n inference delete job gemma-1b-litellm-register
-# Apoi trigger reconcile pe InferenceEndpoint
-kubectl -n inference annotate inferenceendpoint gemma-1b \
+```bash
+microk8s kubectl -n inference delete job <model>-litellm-register
+microk8s kubectl -n inference annotate inferenceendpoint <model> \
   kro.run/force-reconcile="$(date +%s)" --overwrite
 ```
 
-### Jaeger nu arată traces
+### Chat completion fails with `default chat template is no longer allowed`
+
+The model's tokenizer ships without a chat template. The vLLM runtime
+auto-falls back to ChatML — if you still see this error, the pod was created
+before the fallback was added. Roll the deployment:
 
 ```bash
-# 1. Verifică OTel Collector primește
-kubectl -n ai-platform logs deploy/otel-collector | grep -i "received\|trace"
-
-# 2. Verifică LiteLLM emite
-kubectl -n ai-platform logs deploy/litellm | grep -i "otel\|trace"
-
-# 3. Test direct cu trace-cli
-kubectl -n ai-platform run -it --rm trace-test --image=alpine -- sh
-# inside:
-# wget -q -O- http://otel-collector:4317/  (should hang — gRPC)
-
-# 4. Check OTel Collector pipeline
-kubectl -n ai-platform exec deploy/otel-collector -- \
-  cat /etc/otel/collector.yaml | grep -A 5 pipelines
+microk8s kubectl -n inference rollout restart deploy/<model>-predictor
 ```
 
-### Grafana dashboards lipsesc
+### Jaeger shows no traces
 
 ```bash
-# 1. Verifică ConfigMaps existente
-kubectl -n monitoring get cm -l grafana_dashboard=1
+# 1. Did the Collector receive anything?
+microk8s kubectl -n ai-platform logs deploy/otel-collector | grep -i "received\|trace"
 
-# 2. Verifică Grafana sidecar logs
-kubectl -n monitoring logs <grafana-pod> -c grafana-sc-dashboard
+# 2. Is LiteLLM emitting?
+microk8s kubectl -n ai-platform logs deploy/litellm | grep -i "otel\|trace"
 
-# 3. Verifică label/namespace correct
-# Sidecar caută ConfigMaps cu label `grafana_dashboard: "1"`
-# În toate namespace-urile dacă sidecar.searchNamespace=ALL
-
-# 4. Manual import (fallback):
-# Copy JSON content din platform/observability/grafana-dashboard-*.json
-# Grafana UI → Dashboards → Import → Paste JSON
+# 3. Network test
+microk8s kubectl -n ai-platform exec deploy/litellm -- \
+  wget -q -O- http://otel-collector:4317/   # will hang (gRPC) — that's OK
 ```
+
+### Grafana dashboards missing
+
+The Grafana sidecar imports any ConfigMap labelled `grafana_dashboard: "1"`.
+
+```bash
+microk8s kubectl -n observability get cm -l grafana_dashboard=1
+microk8s kubectl -n observability logs <grafana-pod> -c grafana-sc-dashboard
+```
+
+Manual fallback: open Grafana → Dashboards → Import → paste the JSON from
+`charts/qsint-platform/files/dashboards/`.
+
+### Open WebUI says "no models"
+
+`/v1/models` on LiteLLM returns empty → the registration Jobs never
+succeeded. Walk back through the "doesn't appear in LiteLLM" check above.
 
 ---
 
-## 13. Production hardening checklist
+## 17. Production hardening checklist
 
-Asta e PoC. Pentru QSINT prod, trebuie addressed:
+What changes when this leaves the lab.
 
 ### Security
-- [ ] **Secrets management** — External Secrets Operator + Vault. Eliminate hardcoded keys.
-- [ ] **mTLS între servicii** — Istio service mesh strict mode.
-- [ ] **NetworkPolicies** — restrictiv. Inference pods accessible doar de la LiteLLM.
-- [ ] **RBAC** — minim necesar pentru ServiceAccounts.
-- [ ] **Pod Security Standards** — `restricted` nivel pentru workloads (modificat din `privileged` din PoC).
-- [ ] **Image scanning** — Trivy/Snyk pe CI.
-- [ ] **Egress firewall** — whitelist doar HuggingFace + Anthropic + necessary domains.
-- [ ] **Virtual API keys per team** — în loc de master key.
-- [ ] **Master key rotation** — automated, plus coordonarea restart-urilor.
+
+- [ ] Secrets via External Secrets Operator + Vault. Eliminate hard-coded keys.
+- [ ] mTLS between services (Istio strict mode, or Linkerd).
+- [ ] Tight `NetworkPolicies` — inference pods reachable only from LiteLLM.
+- [ ] Minimum-necessary RBAC for every ServiceAccount.
+- [ ] `PodSecurity: restricted` on `ai-platform` and `inference` (PoC uses `privileged`).
+- [ ] Trivy/Snyk image scanning in CI.
+- [ ] Egress firewall whitelisting only Hugging Face + third-party LLM APIs.
+- [ ] Virtual API keys per team (LiteLLM) — never share the master key.
+- [ ] Automated master-key rotation with coordinated restart.
 
 ### Reliability
-- [ ] **HA pentru toate componentele critice:**
-  - LiteLLM: HPA min 2, multi-AZ
-  - PostgreSQL: CloudNativePG cluster, replication
-  - Langfuse: 2+ replicas
-  - OTel Collector: HPA
-- [ ] **Backup/restore PostgreSQL** — pgBackRest, off-site backups
-- [ ] **PodDisruptionBudgets** — pe toate Deployments
-- [ ] **Resource requests/limits** — measured, nu guessed
-- [ ] **Liveness/readiness/startup probes** — tuned (PoC are valori conservative)
+
+- [ ] HA on every critical component:
+  - LiteLLM: HPA `min=2`, multi-AZ.
+  - PostgreSQL: CloudNativePG cluster + replication.
+  - Langfuse: 2+ replicas.
+  - OTel Collector: HPA.
+- [ ] Postgres backups (pgBackRest), off-site copies.
+- [ ] `PodDisruptionBudgets` on all Deployments.
+- [ ] Resource requests/limits measured, not guessed.
+- [ ] Probes tuned (PoC values are conservative).
 
 ### Observability
-- [ ] **Persistent traces** — Jaeger Production cu ES backend (sau Tempo)
-- [ ] **Long-term metrics** — Thanos sau Mimir pentru retention >2 săpt
-- [ ] **Logs centralized** — Loki cu pipeline-uri pentru LLM-specific log parsing
-- [ ] **Alerting** — Alertmanager rules pe error rate, latency, GPU temp, cost
-- [ ] **SLO tracking** — TTFT p95 < 500ms, error rate < 1%, etc.
+
+- [ ] Persistent traces (Jaeger w/ ES, or Tempo).
+- [ ] Long-term metrics (Thanos or Mimir, retention > 2 weeks).
+- [ ] Centralised logs (Loki + LLM-specific pipelines).
+- [ ] Alertmanager rules on error rate, latency, GPU temperature, cost.
+- [ ] SLO tracking — TTFT p95 < 500 ms, error rate < 1 %, etc.
 
 ### Model management
-- [ ] **Internal model registry** — Harbor OCI artifacts, no HuggingFace runtime dependency
-- [ ] **Modelcar pattern** — modelele pre-baked în OCI images, pulled by KServe storage initializer
-- [ ] **Canary deploys** — `canaryTrafficPercent` în InferenceService
-- [ ] **Model versioning** — semantic versioning, rollback strategy
-- [ ] **Re-quantization pipeline** — CI pentru AWQ quantization cu calibration dataset propriu
+
+- [ ] Internal model registry (Harbor OCI artifacts) — drop the runtime HF dependency.
+- [ ] Modelcar pattern — KServe storage initializer pulls weights from OCI.
+- [ ] Canary deploys via `canaryTrafficPercent`.
+- [ ] Semantic versioning + rollback strategy.
+- [ ] In-house re-quantisation CI with calibration datasets.
 
 ### GitOps
-- [ ] **Sealed Secrets** sau ExternalSecrets pentru secret management în Git
-- [ ] **Branch protection** — main branch required reviews
-- [ ] **Pre-commit hooks** — yamllint, kubeval, conftest (OPA policies)
-- [ ] **Promotion environments** — dev → staging → prod separate ArgoCD instances
-- [ ] **ApplicationSets** când număr modele > 10
+
+- [ ] Sealed Secrets / External Secrets for Git-tracked secrets.
+- [ ] Branch protection + required reviews on `master`.
+- [ ] Pre-commit hooks (`yamllint`, `kubeval`, `conftest` with OPA policies).
+- [ ] Separate Argo CD environments — dev → staging → prod.
+- [ ] `ApplicationSet` once the model count crosses ~10.
 
 ### Cost
-- [ ] **Cost attribution per team** — LiteLLM virtual keys + Langfuse cost tracking
-- [ ] **Budget alerts** — Alertmanager rules pe LiteLLM budget metrics
-- [ ] **GPU utilization SLOs** — vRAM utilization > 70%, otherwise consolidate
-- [ ] **Idle scale-down** — pentru modele cu trafic sporadic
+
+- [ ] Per-team cost attribution (LiteLLM virtual keys + Langfuse).
+- [ ] Alertmanager rules on LiteLLM budget metrics.
+- [ ] GPU utilisation SLO (vRAM > 70 % or consolidate).
+- [ ] Idle scale-down for sporadic models.
 
 ---
 
-## 14. Path către prod cu L40S
+## 18. Path to production with L40S
 
-### 14.1 Hardware target
+### Target hardware
 
-Per architectura QSINT plan: cluster de 3-4 noduri, fiecare cu 2-4× L40S 48GB.
+3–4 nodes, each with 2–4 × L40S 48 GB.
 
-### 14.2 Schimbări vs acest PoC
+### Diffs vs the PoC
 
-| Componentă | PoC (RTX 3080) | Prod (L40S) |
+| Component | PoC (RTX 3080) | Prod (L40S) |
 |---|---|---|
-| GPU sharing | HAMi 5GB/pod | MIG `2g.24gb` partitions + HAMi fallback |
-| Models | 2× tiny (1B + 3B AWQ) | Real workloads: Qwen 32B, Llama 70B AWQ, embedders |
-| Replicas | 1 per model | HPA `min=1, max=N` pe vLLM metrics |
-| Storage | Local NFS | Ceph RBD / Longhorn pentru model cache |
-| Postgres | Single replica | CloudNativePG HA cluster |
-| Jaeger | All-in-one | Production cu ES backend (reuse QSINT ES) |
-| ArgoCD | Manual sync | Auto-sync, ApplicationSet pe ` workloads/` dir |
-| Secrets | Hardcoded | External Secrets Operator + Vault |
-| LiteLLM | 1 replica | HPA 2-5 replicas, Redis cache |
+| GPU sharing | HAMi 5 GB / pod | MIG `2g.24gb` + HAMi fallback |
+| Models | 1B + 0.5B + 3B | Qwen 32B, Llama 70B AWQ, real embedders |
+| Replicas | 1 / model | HPA `min=1, max=N` on vLLM metrics |
+| Storage | Local NFS | Ceph RBD / Longhorn |
+| Postgres | Single replica | CloudNativePG HA |
+| Jaeger | All-in-one | Production + Elasticsearch |
+| Argo CD | Bootstrap + manual sync | Auto-sync, `ApplicationSet` per `workloads/` dir |
+| Secrets | Hard-coded | External Secrets + Vault |
+| LiteLLM | 1 replica | HPA 2–5 replicas + Redis cache |
 
-### 14.3 Hybrid MIG + HAMi setup pentru L40S
+### Hybrid MIG + HAMi on L40S
 
-```
-Node: gpu-node-01 (2× L40S)
-  ├─ L40S #0 — MIG mode enabled
-  │    ├─ MIG 4g.48gb instance #1 → Qwen 32B FP16 (full)
-  │    └─ MIG 4g.48gb instance #2 → Llama 70B AWQ (full)
+```text
+Node: gpu-node-01 (2 × L40S)
+  ├─ L40S #0 — MIG enabled
+  │     ├─ MIG 4g.48gb #1 → Qwen 32B FP16 (full)
+  │     └─ MIG 4g.48gb #2 → Llama 70B AWQ (full)
   │
-  └─ L40S #1 — non-MIG mode + HAMi
-       ├─ HAMi vGPU 12GB → embedder model
-       ├─ HAMi vGPU 12GB → reranker model
-       ├─ HAMi vGPU 12GB → NER model
-       └─ HAMi vGPU 12GB → classification model
+  └─ L40S #1 — non-MIG + HAMi
+        ├─ HAMi 12 GB → embedder
+        ├─ HAMi 12 GB → reranker
+        ├─ HAMi 12 GB → NER
+        └─ HAMi 12 GB → classifier
 ```
 
-InferenceServices alege resource type:
+InferenceServices pick their resource type:
 
 ```yaml
-# Pentru modele mari, MIG partition
+# Big model → MIG partition
 spec:
   predictor:
     model:
@@ -1421,7 +1180,7 @@ spec:
         limits:
           nvidia.com/mig-4g.48gb: 1
 
-# Pentru modele mici, HAMi
+# Small model → HAMi vGPU
 spec:
   predictor:
     model:
@@ -1431,7 +1190,7 @@ spec:
           nvidia.com/gpumem: 12000
 ```
 
-### 14.4 HPA pe vLLM metrics
+### HPA on vLLM metrics (sample)
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -1440,281 +1199,173 @@ metadata:
   name: qwen25-7b-hpa
   namespace: inference
 spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: qwen25-7b-predictor
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: qwen25-7b-predictor }
   minReplicas: 1
   maxReplicas: 5
   metrics:
-    # Scale când request queue depth > 5
     - type: Pods
       pods:
-        metric:
-          name: vllm:num_requests_waiting
-        target:
-          type: AverageValue
-          averageValue: "5"
-    # Sau când TTFT p95 > 800ms
+        metric: { name: vllm:num_requests_waiting }
+        target: { type: AverageValue, averageValue: "5" }
     - type: Pods
       pods:
-        metric:
-          name: vllm:time_to_first_token_seconds_p95
-        target:
-          type: AverageValue
-          averageValue: "800m"
+        metric: { name: vllm:time_to_first_token_seconds_p95 }
+        target: { type: AverageValue, averageValue: "800m" }
   behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 30
-      policies:
-        - type: Percent
-          value: 100      # double max per minute
-          periodSeconds: 60
-    scaleDown:
-      stabilizationWindowSeconds: 600  # cooldown 10 min
-      policies:
-        - type: Percent
-          value: 25
-          periodSeconds: 60
+    scaleUp:   { stabilizationWindowSeconds: 30,  policies: [{type: Percent, value: 100, periodSeconds: 60}] }
+    scaleDown: { stabilizationWindowSeconds: 600, policies: [{type: Percent, value: 25,  periodSeconds: 60}] }
 ```
 
-Necesită **Prometheus Adapter** instalat pentru a expune metrice vLLM la K8s metrics API.
+Requires Prometheus Adapter to expose vLLM custom metrics on the K8s metrics
+API.
 
 ---
 
-## 15. CPU backend cu llama.cpp
+## 19. CPU backend with llama.cpp
 
-PoC-ul suportă două backend-uri de inference, alese per workload prin câmpul `spec.backend` din `InferenceEndpoint`:
+The PoC supports **two inference backends**, chosen per workload through
+`spec.backend` in `InferenceEndpoint`:
 
-- **`backend: vllm`** (default) — GPU inference via vLLM ClusterServingRuntime, cu HAMi vGPU partitioning
-- **`backend: llamacpp`** — CPU inference via llama.cpp ClusterServingRuntime, fără GPU
+- `backend: vllm` (default) — GPU via vLLM ClusterServingRuntime, with HAMi
+  vGPU partitioning.
+- `backend: llamacpp` — CPU via llama.cpp ClusterServingRuntime, no GPU.
 
-### 15.1 De ce un al doilea backend?
+### 19.1 Why a second backend?
 
-| Motiv | Detaliu |
+| Reason | Detail |
 |---|---|
-| **Resource efficiency** | Pe noduri fără GPU (sau când GPU-ul e saturated), CPU rămâne o opțiune viabilă pentru modele mici (1B-7B). |
-| **Cost optimization** | În prod cu cloud GPU pricing (~$1-3/h pentru L40S), un model cu trafic redus poate rula pe CPU la o fracțiune din cost. |
-| **Fallback availability** | Dacă pod-urile GPU sunt down (driver crash, OOM, node failure), LiteLLM poate route-a la model CPU echivalent. |
-| **Dev/staging environments** | Echipa de dezvoltare nu mai are nevoie de GPU pentru a testa flows end-to-end. |
-| **Background async workloads** | Summarization, batch enrichment, low-priority queues — toate tolerează latențe mai mari. |
-| **Energy efficiency** | RTX 3080 consumă ~250W full load. Un Xeon făcând aceeași treabă consumă ~80W. |
+| Resource efficiency | On nodes without a GPU (or when the GPU is saturated), CPU is still viable for small models (1B–7B). |
+| Cost optimisation | At cloud rates (~$1–3/h per L40S), a low-traffic model can run on CPU at a fraction of the price. |
+| Fallback availability | If GPU pods fail, LiteLLM can route to a CPU equivalent. |
+| Dev/staging | The team can test end-to-end flows without GPU access. |
+| Background async jobs | Summarisation, batch enrichment, low-priority queues tolerate higher latency. |
+| Energy | An RTX 3080 idles around 250 W under load; a Xeon doing the same job draws ~80 W. |
 
-### 15.2 Performance așteptat
+### 19.2 Expected performance
 
-Pe CPU modern (Xeon Gold, EPYC Rome+, sau Apple Silicon — dacă cumva ai noduri Mac Mini):
+On a modern Xeon Gold / EPYC Rome+ with AVX-512:
 
-| Metric | Qwen2.5-3B Q4_K_M | Comentariu |
+| Metric | Qwen2.5 3B Q4_K_M | Note |
 |---|---|---|
-| Throughput generation | 15-30 tokens/sec | Depinde de AVX-512 / NEON support |
-| Throughput prompt processing | 50-100 tokens/sec | Mai lent decât generation paradoxal — overhead per-token |
-| TTFT | 100-300ms | Pentru prompt-uri 50-200 tokens |
-| RAM | ~3GB resident | weights + KV cache + buffers |
-| Cold start | 30-60s | Prima dată (download GGUF). Ulterior 5-10s (mmap din PVC). |
-| Optimal threads | 4-8 physical cores | Memory bandwidth bound peste 8 cores |
+| Generation throughput | 15–30 tok/s | AVX-512 / NEON bound |
+| Prompt-processing throughput | 50–100 tok/s | Surprisingly lower than generation per-token, due to overhead |
+| TTFT | 100–300 ms | For 50–200 token prompts |
+| Resident RAM | ~3 GB | Weights + KV cache + buffers |
+| Cold start | 30–60 s first boot (download); 5–10 s subsequent (mmap) | |
+| Sweet spot threads | 4–8 physical cores | Memory-bandwidth-bound past 8 cores |
 
-Pentru comparație:
-- **vLLM pe RTX 3080**: ~80-120 tokens/sec generation (3-5x mai rapid)
-- **vLLM pe L40S**: ~200-300 tokens/sec generation (10x mai rapid)
+For reference:
+- vLLM on RTX 3080: ~80–120 tok/s generation (~4× faster).
+- vLLM on L40S: ~200–300 tok/s generation (~10× faster).
 
-### 15.3 Când folosești llama.cpp în loc de vLLM?
+### 19.3 When to use which
 
-**Folosește llama.cpp:**
-- Trafic sub 1 req/sec persistent
-- Modele sub 7B (peste, performance CPU devine inacceptabilă)
-- Workloads tolerante la latență (background jobs, async pipelines)
-- Cluster fără GPU disponibil în acel moment
-- Cost matters mai mult decât latency
-- Modele cu cerințe de quantizare exotice (GGUF Q2_K, Q3_K_S etc — vLLM nu suportă)
+**Use llama.cpp when**
+- traffic < 1 req/s sustained
+- model ≤ 7B
+- workload is latency-tolerant (background / async)
+- no GPU is available
+- cost matters more than latency
+- exotic quants needed (GGUF Q2_K, Q3_K_S, …) — vLLM can't load these
 
-**Folosește vLLM:**
-- Trafic peste 1 req/sec
-- Modele peste 7B (CPU prea lent)
-- Workloads user-facing (chat interactive)
-- TTFT critic (sub 500ms)
-- Throughput maxim necesar
-- Quantizări standard (AWQ INT4, GPTQ, FP16, FP8)
+**Use vLLM when**
+- traffic > 1 req/s
+- model > 7B
+- workload is user-facing (interactive chat)
+- TTFT must be sub-500 ms
+- you need maximum throughput
+- you only need standard quants (AWQ INT4, GPTQ, FP16, FP8)
 
-### 15.4 Cum funcționează — sub capotă
+### 19.4 How it works under the hood
 
-```
+```text
 InferenceEndpoint qwen25-3b-cpu (backend: llamacpp)
         │
-        │  KRO ResourceGraphDefinition expandează:
+        │  KRO RGD expands to:
         ▼
 KServe InferenceService
-   ├─ modelFormat.name: gguf       ← determinant pentru runtime match
+   ├─ modelFormat.name: gguf       ← matches llamacpp-runtime
    ├─ runtime: llamacpp-runtime    ← ClusterServingRuntime
    └─ resources:
-        nvidia.com/gpu: "0"        ← KServe ignoră (admission strip dacă "0")
-        cpu: 4 (request), 8 (limit)
-        memory: 4Gi (request), 8Gi (limit)
+        nvidia.com/gpu: "0"        ← stripped by admission
+        cpu: 4 (request) / 8 (limit)
+        memory: 4Gi / 8Gi
         │
-        │  KServe controller creează Deployment:
+        │  KServe creates the Deployment:
         ▼
 Pod qwen25-3b-cpu-predictor-XXX
-   │  schedulerName: <none>   ← default kube-scheduler, NU hami-scheduler
+   │  schedulerName: <default kube-scheduler>   ← NOT hami
    │
-   ├─ Container kserve-container (image llama.cpp:server-b4404)
+   ├─ container kserve-container (image llama.cpp:server-b4404)
+   │   ├─ shell wrapper:
+   │   │   1. check /models/qwen2.5-3b-instruct-q4_k_m.gguf
+   │   │   2. if missing, wget MODEL_URL → PVC
+   │   │   3. exec /llama-server --model /models/$MODEL_FILE
    │   │
-   │   ├─ Shell wrapper:
-   │   │   1. Check if /models/qwen2.5-3b-instruct-q4_k_m.gguf exists
-   │   │   2. If not, wget from MODEL_URL → save to PVC
-   │   │   3. exec /llama-server with --model /models/$MODEL_FILE
-   │   │
-   │   └─ llama-server runs:
+   │   └─ llama-server:
    │        --host 0.0.0.0 --port 8080
    │        --threads 6 --ctx-size 2048
    │        --cont-batching --n-gpu-layers 0
-   │        → exposes OpenAI-compatible API on :8080
+   │        → OpenAI-compatible API on :8080
    │
-   └─ Volume: model-cache-pvc (shared cu vLLM pods)
-        │
-        ▼ contains GGUF files cached across pods
+   └─ Volume: model-cache-pvc (shared with vLLM pods)
 ```
 
-### 15.5 Concurența vLLM + llama.cpp pe același cluster
-
-Cele două backend-uri rulează **fără să se interfere**:
+### 19.5 vLLM and llama.cpp coexisting
 
 | Aspect | vLLM pods | llama.cpp pods |
 |---|---|---|
-| Scheduler | `hami-scheduler` | `kube-scheduler` (default) |
-| GPU resources | `nvidia.com/gpu`, `gpumem`, `gpucores` | Niciunul |
-| CPU resources | 1-4 cores | 4-8 cores |
-| Memory | 4-16GB | 4-8GB |
-| Pod placement | Doar pe noduri cu label `gpu=true` | Orice nod în cluster |
-| PVC model-cache | Shared (read GGUF + HF cache) | Shared (read GGUF) |
-| LiteLLM registration | Identică (POST /model/new) | Identică |
-| Open WebUI dropdown | Apar amestecate | Apar amestecate |
+| Scheduler | `hami-scheduler` | default `kube-scheduler` |
+| GPU resources | `nvidia.com/gpu`, `gpumem`, `gpucores` | none |
+| CPU | 1–4 cores | 4–8 cores |
+| Memory | 4–16 GB | 4–8 GB |
+| Pod placement | GPU-labelled nodes only | any node |
+| Shared model cache | HF cache + GGUF | GGUF |
+| LiteLLM registration | identical | identical |
+| Open WebUI dropdown | mixed | mixed |
 
-În Open WebUI, user-ul vede:
-```
+End users see one mixed dropdown:
+
+```text
 Models:
   ▼ gemma-1b-fast          (GPU, vLLM)
   ▼ smollm3-3b-quality     (GPU, vLLM)
   ▼ qwen-3b-cpu            (CPU, llama.cpp)
 ```
 
-Schimbarea modelului din dropdown e transparent — LiteLLM routes la backend-ul corespunzător.
+Switching is transparent — LiteLLM routes to the right backend.
 
-### 15.6 Routing inteligent în LiteLLM — fallback GPU → CPU
+### 19.6 GPU → CPU fallback in LiteLLM (prod pattern)
 
-Pentru prod, configurezi LiteLLM cu **router fallbacks**:
+Configure router fallbacks so primary GPU failure cascades to CPU
+transparently:
 
 ```yaml
-# litellm-config.yaml
 model_list:
-  - model_name: "qwen-chat"           # alias virtual
+  - model_name: "qwen-chat"
     litellm_params:
-      model: "openai/qwen25-3b-gpu"   # primary: GPU vLLM
+      model: "openai/qwen25-3b-gpu"
       api_base: "http://qwen25-3b-predictor.inference.svc.cluster.local/v1"
       api_key: "dummy"
   - model_name: "qwen-chat-fallback"
     litellm_params:
-      model: "openai/qwen25-3b-cpu"   # backup: CPU llama.cpp
+      model: "openai/qwen25-3b-cpu"
       api_base: "http://qwen25-3b-cpu-predictor.inference.svc.cluster.local/v1"
       api_key: "dummy"
 
 router_settings:
   fallbacks:
     - {"qwen-chat": ["qwen-chat-fallback"]}
-  # Try GPU first. If it fails (timeout, 5xx, OOM), auto-retry on CPU.
   num_retries: 1
   request_timeout: 30
 ```
 
-Astfel, user-ul cere `qwen-chat`, LiteLLM încearcă GPU pod; dacă răspunde în 30s ok, altfel cade automat pe CPU pod. **Transparent pentru client.**
+The client asks for `qwen-chat`; LiteLLM tries GPU and, on timeout / 5xx,
+retries against CPU automatically.
 
-### 15.7 Workload definition complet
+### 19.7 Observability for CPU pods
 
-Vezi `workloads/qwen25-3b-cpu.yaml`. Câmpurile cheie:
-
-```yaml
-apiVersion: kro.run/v1alpha1
-kind: InferenceEndpoint
-metadata:
-  name: qwen25-3b-cpu
-  namespace: inference
-spec:
-  backend: llamacpp                 # ← cheia care selectează runtime-ul
-  modelFile: "qwen2.5-3b-instruct-q4_k_m.gguf"
-  modelUrl: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
-  servedName: "qwen25-3b-cpu"
-  ctxSize: 2048
-  threads: 6
-  batchSize: 512
-  cpuRequest: "4"
-  cpuLimit: "8"
-  memoryRequest: "4Gi"
-  memoryLimit: "8Gi"
-  litellmAlias: "qwen-3b-cpu"
-```
-
-### 15.8 Tutorial: deploy Qwen2.5-3B CPU
-
-```bash
-# 1. Commit workload nou
-git add workloads/qwen25-3b-cpu.yaml
-git commit -m "feat: add Qwen2.5-3B CPU inference"
-git push
-
-# 2. ArgoCD sync (auto sau manual)
-argocd app sync workloads
-
-# 3. Watch progres
-kubectl -n inference get inferenceendpoint qwen25-3b-cpu -w
-kubectl -n inference get inferenceservices
-
-# 4. Watch download progres
-kubectl -n inference logs -l serving.kserve.io/inferenceservice=qwen25-3b-cpu -f
-# Output expectat:
-# Model file /models/qwen2.5-3b-instruct-q4_k_m.gguf not found. Downloading...
-# Source: https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/...
-# ...progress...
-# Download complete: 1.9G  /models/qwen2.5-3b-instruct-q4_k_m.gguf
-# Starting llama-server with 6 threads, context 2048
-# llama-server: starting on 0.0.0.0:8080
-
-# 5. Verifică pod plasat pe nod fără GPU (sau orice nod, nu contează)
-kubectl -n inference get pod -l serving.kserve.io/inferenceservice=qwen25-3b-cpu -o wide
-
-# 6. Verifică LiteLLM are modelul înregistrat
-kubectl -n ai-platform port-forward svc/litellm 4000:4000 &
-curl http://localhost:4000/v1/models \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" | jq '.data[].id'
-# Output: "qwen-3b-cpu", alături de "gemma-1b-fast", "smollm3-3b-quality"
-
-# 7. Test inference
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen-3b-cpu",
-    "messages": [{"role": "user", "content": "Salut! Vorbești română?"}],
-    "max_tokens": 100
-  }'
-
-# 8. Open WebUI — modelul apare în dropdown
-xdg-open http://<node-ip>:30080
-```
-
-### 15.9 Production hardening pentru CPU backend
-
-| Item | Action |
-|---|---|
-| **Model pre-download** | Pre-populează PVC cu GGUF înainte de deploy; elimini cold-start network dependency |
-| **OCI model packaging** | Push GGUF ca OCI artifact în Harbor, schimbi shell wrapper să folosească `oras pull` |
-| **HPA pe CPU utilization** | `kind: HorizontalPodAutoscaler` cu `targetCPUUtilizationPercentage: 70` |
-| **Node affinity** | `nodeSelector: cpu-only=true` pe pod-uri llama.cpp ca să nu ocupe noduri GPU degeaba |
-| **Resource quotas** | `LimitRange` pe namespace pentru a împiedica modele CPU să acapareze tot cluster-ul |
-| **mlock pentru latency** | Adaugă `--mlock` în args + `securityContext.capabilities.add: [IPC_LOCK]` pentru a împiedica swap |
-| **Multi-replica** | `minReplicas: 2` cu PDB pentru HA |
-| **Distinct PVC pentru GGUF** | Separate de model-cache HF pentru lifecycle management diferit |
-
-### 15.10 Observabilitate CPU backend
-
-llama.cpp server expune **Prometheus metrics** pe `/metrics` (flag `--metrics`):
+llama.cpp's server exposes Prometheus metrics on `/metrics`:
 
 ```
 llamacpp_n_prompt_tokens_processed_total
@@ -1722,163 +1373,116 @@ llamacpp_n_tokens_predicted_total
 llamacpp_prompt_tokens_seconds
 llamacpp_predicted_tokens_seconds
 llamacpp_kv_cache_usage_ratio
-llamacpp_kv_cache_tokens
 llamacpp_requests_processing
 llamacpp_requests_deferred
 ```
 
-PodMonitor pentru scraping (similar cu vLLM):
+A `PodMonitor` covers scraping. **Known limitation:** llama.cpp's server does
+not yet emit OTLP traces — the distributed trace for CPU models stops at the
+LiteLLM → pod boundary. Accept for the PoC; for prod, either wait for
+upstream OTLP support or sidecar an Envoy / nginx with OTel instrumentation.
 
-```yaml
-# Add to platform/observability/llamacpp-podmonitor.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: llamacpp-inference-pods
-  namespace: inference
-spec:
-  namespaceSelector:
-    matchNames: [inference]
-  selector:
-    matchExpressions:
-      - key: serving.kserve.io/inferenceservice
-        operator: Exists
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 15s
-```
+### 19.8 Honest critique of the integration
 
-**Limitare actuală**: llama.cpp server **nu suportă încă OTLP nativ**. Tracing distribuit acoperă doar până la LiteLLM → pod (request-ul intră în pod, dar pod-ul nu emite span-uri proprii). Acceptabil pentru PoC.
+Compromises in the current PoC:
 
-Pentru tracing complet, ai două opțiuni de viitor:
-1. Aștepți suport OTLP nativ în llama.cpp (urmărit aici: github.com/ggerganov/llama.cpp issues)
-2. Folosești un **sidecar proxy cu OTel** (Envoy/nginx + OTel collector instrumentation) între LiteLLM și llama.cpp pod
-
-### 15.11 Critici onești ale acestei integrări
-
-**Compromisuri reale acceptate în PoC:**
-
-1. **Download la cold start** — primul boot al pod-ului ia 30-60s pentru 2GB GGUF. Pe slow networks (sub 50Mbps), poate fi minute. Pentru prod: pre-bake.
-
-2. **`apt-get install wget` în shell wrapper** — fragil, depinde de imaginea de bază. Dacă llama.cpp upstream schimbă la imagine slim/distroless, breakage. Fix prod: image custom cu wget pre-installed.
-
-3. **No OTLP tracing din llama.cpp** — gap real în observabilitate end-to-end. Documentat.
-
-4. **CEL ternary pentru resources** — pattern fragil în KRO v1alpha1. Funcționează acum, dar testare extinsă recomandată pe versiuni viitoare KRO.
-
-5. **`nvidia.com/gpu: "0"` în resources** — Kubernetes admission *poate* respinge în versiuni stricte. Soluție alternativă mai sigură: două RGD-uri separate (deși fragmentează schema). Validare runtime necesară.
-
-6. **Shared PVC pentru ambele backends** — funcționează dar nu e ideal. Vlmm cache (`.cache/huggingface`) și GGUF files au lifecycle diferit. Pentru prod: PVC-uri separate.
-
-7. **Threading hardcoded la 6** — ar trebui dinamic în funcție de CPU-ul nodului. Fix: Downward API pentru a citi `requests.cpu` și pasa ca `--threads`.
+1. **Download on cold start.** First pod boot takes 30–60 s for a 2 GB GGUF;
+   slow networks can stretch it to minutes. Prod fix: pre-bake the PVC.
+2. **`apt-get install wget` in the shell wrapper.** Fragile against base
+   image changes. Prod fix: custom image with `wget` baked in.
+3. **No OTLP from llama.cpp.** Real gap in end-to-end tracing. Documented.
+4. **CEL ternaries in KRO v1alpha1.** Works today, fragile across versions —
+   regression-test on KRO bumps.
+5. **`nvidia.com/gpu: "0"` in resources.** Future strict admission may
+   reject this. Safer (but uglier): two separate RGDs.
+6. **Shared model-cache PVC.** Works but mixes HF cache and GGUF lifecycles.
+   Prod: separate PVCs.
+7. **Hard-coded `--threads 6`.** Should be derived from `requests.cpu` via
+   the Downward API.
 
 ---
 
-## Anexe
-
-### A. Lista completă a fișierelor
+## 20. Repo layout
 
 ```
-qsint-ai-platform/
+.
 ├── README.md
-├── bootstrap.sh
-├── docs/
-│   ├── deployment-guide.md
-│   ├── design-doc.md
-│   └── docs.md                          ← acest document
-├── kro-templates/
-│   └── inference-endpoint-rgd.yaml       ← ResourceGraphDefinition KRO
-├── platform/
-│   ├── argocd/                           ← 5 fișiere: AppProject + 3 Applications + kustomization
-│   ├── namespaces/
-│   │   └── namespaces.yaml
-│   ├── hami/
-│   │   ├── README.md
-│   │   ├── hami-application.yaml
-│   │   └── servicemonitor.yaml
-│   ├── kro/
-│   │   └── kro-application.yaml
-│   ├── kserve/
-│   │   ├── huggingface-secret.yaml
-│   │   ├── kserve-application.yaml
-│   │   ├── litellm-secret-mirror.yaml
-│   │   ├── llamacpp-servingruntime.yaml ← CPU runtime via llama.cpp server
-│   │   ├── model-cache-pvc.yaml
-│   │   └── vllm-servingruntime.yaml     ← GPU runtime via vLLM
-│   ├── postgresql/
-│   │   └── postgresql.yaml
-│   ├── litellm/
-│   │   └── litellm.yaml                  ← cu OTel callbacks
-│   ├── langfuse/
-│   │   └── langfuse.yaml
-│   ├── open-webui/
-│   │   └── open-webui.yaml
-│   └── observability/                    ← stack-ul de observabilitate
-│       ├── jaeger.yaml
-│       ├── otel-collector.yaml
-│       ├── vllm-podmonitor.yaml
-│       ├── grafana-dashboard-hami.json
-│       ├── grafana-dashboard-vllm.json
-│       ├── grafana-dashboard-litellm.json
-│       └── grafana-dashboards-configmap.yaml  ← auto-import în Grafana
-└── workloads/
-    ├── gemma-1b.yaml                     ← GPU (vLLM, Gemma)
-    ├── qwen25-3b-cpu.yaml                ← CPU (llama.cpp, Qwen)
-    └── smollm3-3b.yaml                   ← GPU (vLLM, SmolLM3)
+├── .gitignore
+├── .helmignore
+├── charts/                          Helm charts — source of truth
+│   ├── qsint-namespaces/            ai-platform, inference namespaces
+│   ├── qsint-cert-manager/          cert-manager wrapper
+│   ├── qsint-observability-stack/   kube-prometheus-stack wrapper
+│   ├── qsint-argocd/                Argo CD wrapper
+│   ├── qsint-hami/                  HAMi vGPU wrapper
+│   ├── qsint-kro/                   KRO controller wrapper
+│   ├── qsint-kserve-crd/            KServe CRDs
+│   ├── qsint-kserve/                KServe wrapper
+│   ├── qsint-gitlab/                Vendored GitLab CE chart + qsint-values.yaml
+│   ├── qsint-kro-templates/         The InferenceEndpoint RGD
+│   ├── qsint-platform/              ai-platform services (LiteLLM, Open WebUI,
+│   │                                 Langfuse, Jaeger, OTel, Postgres, runtimes,
+│   │                                 ingresses, dashboards)
+│   └── qsint-workloads/             Example InferenceEndpoints + register Jobs
+├── scripts/
+│   ├── deploy-microk8s.sh           One-shot installer / upgrader
+│   └── update-local-hosts.sh        Maps *.local.ro hostnames to 127.0.0.1
+└── tests/
+    ├── e2e_smoke.py                 stdlib-only e2e: LiteLLM + Open WebUI
+    └── README.md
 ```
 
-### B. Endpoint-uri și porturi expuse
+---
 
-Toate UI-urile sunt expuse prin MicroK8s ingress pe hostnames locale. Rulează `sudo ./scripts/update-local-hosts.sh`, apoi folosește tabelul [Local UI access and credentials](#local-ui-access-and-credentials).
-
-| Serviciu | Namespace | Port intern | Ingress local |
-|---|---|---|---|
-| Argo CD | `argocd` | 8080/443 | http://argocd.local.ro |
-| GitLab | `gitlab` | 8181 | http://gitlab.local.ro |
-| GitLab MinIO | `gitlab` | 9000 | http://minio.local.ro |
-| GitLab KAS | `gitlab` | 8150 | http://kas.local.ro |
-| Grafana | `observability` | 3000 | http://grafana.local.ro |
-| Open WebUI | `ai-platform` | 8080 | http://open-webui.local.ro |
-| Langfuse | `ai-platform` | 3000 | http://langfuse.local.ro |
-| Jaeger UI | `ai-platform` | 16686 | http://jaeger.local.ro |
-| LiteLLM API / admin | `ai-platform` | 4000 | http://litellm.local.ro |
-
-### C. Tools comands cheat-sheet
+## 21. Cheat-sheet
 
 ```bash
-# ArgoCD
+# Argo CD
 argocd app list
-argocd app sync <name>
-argocd app diff <name>
+argocd app sync qsint-workloads
+argocd app diff qsint-platform
 
 # KRO
-kubectl get resourcegraphdefinitions
-kubectl get inferenceendpoints -A
+microk8s kubectl get resourcegraphdefinitions
+microk8s kubectl get inferenceendpoints -A
 
 # KServe
-kubectl get inferenceservices -A
-kubectl get servingruntime,clusterservingruntime -A
+microk8s kubectl get inferenceservices -A
+microk8s kubectl get servingruntime,clusterservingruntime -A
 
 # HAMi
-kubectl -n hami-system logs -l app.kubernetes.io/name=hami-scheduler
-kubectl describe node <gpu-node> | grep nvidia.com
+microk8s kubectl -n kube-system logs -l app.kubernetes.io/name=hami-scheduler
+microk8s kubectl describe node <node> | grep -A4 'Allocated resources'
+microk8s kubectl describe node <node> | grep nvidia.com
 
-# Force-reconcile InferenceEndpoint
-kubectl annotate inferenceendpoint <name> -n inference \
+# Force reconcile an InferenceEndpoint
+microk8s kubectl -n inference annotate inferenceendpoint <name> \
   kro.run/force-reconcile="$(date +%s)" --overwrite
+
+# Re-run a registration Job
+microk8s kubectl -n inference delete job <model>-litellm-register
+microk8s helm3 upgrade --install qsint-workloads charts/qsint-workloads \
+  -n inference
+
+# Quick LiteLLM smoke
+curl -s http://litellm.local.ro/v1/models \
+  -H "Authorization: Bearer $LITELLM_KEY" | jq '.data[].id'
 ```
 
-### D. Referințe externe
+---
 
-- AWS re:Invent 2026: "Building an Internal AI Platform with KRO" (slide-urile sursă)
-- KServe docs: https://kserve.github.io/website/
-- KRO docs: https://kro.run
-- HAMi docs: https://github.com/Project-HAMi/HAMi
-- vLLM docs: https://docs.vllm.ai
-- llama.cpp server: https://github.com/ggerganov/llama.cpp/tree/master/examples/server
-- Qwen2.5 GGUF models: https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF
-- LiteLLM docs: https://docs.litellm.ai
-- Langfuse docs: https://langfuse.com/docs
-- OpenTelemetry Collector: https://opentelemetry.io/docs/collector/
-- Jaeger: https://www.jaegertracing.io/docs/
+## 22. References
+
+- AWS re:Invent 2026 — *Building an Internal AI Platform with KRO*
+- KServe — <https://kserve.github.io/website/>
+- KRO — <https://kro.run>
+- HAMi — <https://github.com/Project-HAMi/HAMi>
+- vLLM — <https://docs.vllm.ai>
+- llama.cpp server — <https://github.com/ggerganov/llama.cpp/tree/master/examples/server>
+- LiteLLM — <https://docs.litellm.ai>
+- Langfuse — <https://langfuse.com/docs>
+- OpenTelemetry Collector — <https://opentelemetry.io/docs/collector/>
+- Jaeger — <https://www.jaegertracing.io/docs/>
+- Argo CD — <https://argo-cd.readthedocs.io>
+- GitLab Helm chart — <https://docs.gitlab.com/charts/>
+- Qwen2.5 GGUF — <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF>

@@ -1,4 +1,36 @@
 ---
+# ConfigMap with fallback chat templates. Used by the vLLM runtime when the
+# upstream model's tokenizer does not define one (transformers >=4.44 stopped
+# allowing a default template). The startup script picks a template only when
+# the tokenizer is missing it — models that ship their own (TinyLlama, Qwen
+# Instruct, etc.) are left untouched.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-chat-templates
+  namespace: inference
+data:
+  # Generic ChatML — works for Qwen-style models and is a reasonable default
+  # for any modern instruct model that lost its template during quantization.
+  # The block is wrapped in a Helm raw-literal so Helm does not interpret the
+  # Jinja double-brace placeholders as Go template actions.
+  chatml.jinja: |
+{{ `    {% for message in messages -%}
+    {% if message['role'] == 'system' -%}
+    <|im_start|>system
+    {{ message['content'] }}<|im_end|>
+    {% elif message['role'] == 'user' -%}
+    <|im_start|>user
+    {{ message['content'] }}<|im_end|>
+    {% elif message['role'] == 'assistant' -%}
+    <|im_start|>assistant
+    {{ message['content'] }}<|im_end|>
+    {% endif -%}
+    {% endfor -%}
+    {% if add_generation_prompt -%}
+    <|im_start|>assistant
+    {% endif -%}` }}
+---
 # vLLM ClusterServingRuntime
 #
 # Critical design choices:
@@ -11,6 +43,10 @@
 #    OCI modelcar or pre-baked PVC.
 # 4. Env vars (MODEL_ID, MAX_MODEL_LEN etc) are templated into args. Overridden per
 #    InferenceService via env injection by KRO.
+# 5. Chat-template fallback: some HF quants ship without tokenizer_config.json
+#    chat_template (e.g. Qwen/Qwen2.5-0.5B-Instruct-AWQ). The startup script
+#    probes the tokenizer and only passes --chat-template when missing, so it
+#    never overrides templates that the model already provides.
 apiVersion: serving.kserve.io/v1alpha1
 kind: ClusterServingRuntime
 metadata:
@@ -51,6 +87,29 @@ spec:
               "opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0"
           fi
 
+          # Chat-template fallback: pass --chat-template only when the
+          # tokenizer is missing one (transformers >=4.44 no longer supplies
+          # a default). Models that already ship a template keep theirs.
+          CHAT_TEMPLATE_ARG=""
+          if python3 - <<'PY'
+          import os, sys
+          try:
+              from transformers import AutoTokenizer
+              t = AutoTokenizer.from_pretrained(
+                  os.environ["MODEL_ID"], trust_remote_code=True
+              )
+              sys.exit(0 if t.chat_template else 1)
+          except Exception as e:
+              print(f"chat-template probe failed: {e}", file=sys.stderr)
+              sys.exit(1)
+          PY
+          then
+              echo "Tokenizer ships a chat_template — using model's own."
+          else
+              echo "Tokenizer has no chat_template — falling back to /etc/vllm/chatml.jinja"
+              CHAT_TEMPLATE_ARG="--chat-template=/etc/vllm/chatml.jinja"
+          fi
+
           exec python3 -m vllm.entrypoints.openai.api_server \
             --port=8000 \
             --host=0.0.0.0 \
@@ -64,7 +123,8 @@ spec:
             --enable-prefix-caching \
             --disable-log-requests \
             --otlp-traces-endpoint="$${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-            --collect-detailed-traces=all
+            --collect-detailed-traces=all \
+            $CHAT_TEMPLATE_ARG
 
       ports:
         - containerPort: 8000
@@ -137,6 +197,9 @@ spec:
           mountPath: /models
         - name: shm
           mountPath: /dev/shm
+        - name: vllm-chat-templates
+          mountPath: /etc/vllm
+          readOnly: true
 
       livenessProbe:
         httpGet:
@@ -173,3 +236,9 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 2Gi
+    - name: vllm-chat-templates
+      configMap:
+        name: vllm-chat-templates
+        items:
+          - key: chatml.jinja
+            path: chatml.jinja

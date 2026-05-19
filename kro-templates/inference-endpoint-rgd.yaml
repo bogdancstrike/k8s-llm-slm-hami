@@ -45,7 +45,7 @@ spec:
       # ─── Backend selection ─────────────────────────────────────────────
       # "vllm" (default) — GPU inference via vLLM runtime (HuggingFace model ID)
       # "llamacpp"       — CPU inference via llama.cpp runtime (GGUF file)
-      backend: string | default="vllm" | enum="vllm,llamacpp"
+      backend: string | default="vllm"
 
       # ─── Common fields ─────────────────────────────────────────────────
       # Internal name used by the runtime's --served-model-name (vLLM) / --alias (llama.cpp)
@@ -96,7 +96,6 @@ spec:
     # Status — surfaces underlying resource state on the InferenceEndpoint CR
     status:
       endpointUrl: ${kserveInferenceService.status.url}
-      ready: '${kserveInferenceService.status.conditions[?@.type=="Ready"].status}'
       registeredInLiteLLM: ${litellmRegisterJob.status.succeeded}
 
   # ───────────────────────────────────────────────────────────────────────

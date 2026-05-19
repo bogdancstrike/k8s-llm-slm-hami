@@ -37,6 +37,7 @@ $HELM uninstall hami -n kube-system --wait --timeout 5m >/dev/null 2>&1 || true
 $HELM uninstall kube-prom-stack -n observability --wait --timeout 10m >/dev/null 2>&1 || true
 $HELM uninstall argocd -n argocd --wait --timeout 5m >/dev/null 2>&1 || true
 $HELM uninstall cert-manager -n cert-manager --wait --timeout 5m >/dev/null 2>&1 || true
+$HELM uninstall qsint-namespaces -n default --wait --timeout 5m >/dev/null 2>&1 || true
 
 echo "Deleting raw-install namespaces owned by the platform"
 $KUBECTL delete namespace argocd cert-manager gitlab ai-platform inference kserve kro-system --ignore-not-found=true
@@ -48,7 +49,52 @@ wait_namespace_deleted inference
 wait_namespace_deleted kserve
 wait_namespace_deleted kro-system
 
+echo "Deleting legacy dashboard ConfigMaps that predate Helm ownership"
+$KUBECTL delete configmap hami-native-dashboard -n observability --ignore-not-found=true
+$KUBECTL delete servicemonitor \
+  hami-scheduler-metrics \
+  hami-device-plugin-metrics \
+  -n observability \
+  --ignore-not-found=true
+
 echo "Deleting cert-manager CRDs from the previous raw install, if present"
+$KUBECTL delete clusterrole \
+  cert-manager-cainjector \
+  cert-manager-cluster-view \
+  cert-manager-controller-approve:cert-manager-io \
+  cert-manager-controller-certificates \
+  cert-manager-controller-certificatesigningrequests \
+  cert-manager-controller-challenges \
+  cert-manager-controller-clusterissuers \
+  cert-manager-controller-ingress-shim \
+  cert-manager-controller-issuers \
+  cert-manager-controller-orders \
+  cert-manager-edit \
+  cert-manager-view \
+  cert-manager-webhook:subjectaccessreviews \
+  --ignore-not-found=true
+$KUBECTL delete clusterrolebinding \
+  cert-manager-cainjector \
+  cert-manager-controller-approve:cert-manager-io \
+  cert-manager-controller-certificates \
+  cert-manager-controller-certificatesigningrequests \
+  cert-manager-controller-challenges \
+  cert-manager-controller-clusterissuers \
+  cert-manager-controller-ingress-shim \
+  cert-manager-controller-issuers \
+  cert-manager-controller-orders \
+  cert-manager-webhook:subjectaccessreviews \
+  --ignore-not-found=true
+$KUBECTL delete mutatingwebhookconfiguration cert-manager-webhook --ignore-not-found=true
+$KUBECTL delete validatingwebhookconfiguration cert-manager-webhook --ignore-not-found=true
+$KUBECTL delete role -n kube-system \
+  cert-manager-cainjector:leaderelection \
+  cert-manager:leaderelection \
+  --ignore-not-found=true
+$KUBECTL delete rolebinding -n kube-system \
+  cert-manager-cainjector:leaderelection \
+  cert-manager:leaderelection \
+  --ignore-not-found=true
 $KUBECTL delete crd \
   certificaterequests.cert-manager.io \
   certificates.cert-manager.io \
@@ -56,6 +102,23 @@ $KUBECTL delete crd \
   clusterissuers.cert-manager.io \
   issuers.cert-manager.io \
   orders.acme.cert-manager.io \
+  --ignore-not-found=true
+
+echo "Deleting Argo CD cluster-scoped objects from the previous raw install, if present"
+$KUBECTL delete clusterrole \
+  argocd-application-controller \
+  argocd-applicationset-controller \
+  argocd-server \
+  --ignore-not-found=true
+$KUBECTL delete clusterrolebinding \
+  argocd-application-controller \
+  argocd-applicationset-controller \
+  argocd-server \
+  --ignore-not-found=true
+$KUBECTL delete crd \
+  applications.argoproj.io \
+  applicationsets.argoproj.io \
+  appprojects.argoproj.io \
   --ignore-not-found=true
 
 echo "Ensuring GPU node label expected by HAMi"
@@ -103,9 +166,13 @@ $HELM upgrade --install gitlab "$ROOT_DIR/platform/gitlab/gitlab" \
   --values "$ROOT_DIR/platform/gitlab/values.yaml" \
   --wait --timeout 30m
 
+echo "Installing QSINT namespaces"
+$HELM upgrade --install qsint-namespaces "$ROOT_DIR/charts/qsint-namespaces" \
+  --namespace default --wait --timeout 5m
+
 echo "Installing QSINT platform manifests"
 $HELM upgrade --install qsint-platform "$ROOT_DIR/charts/qsint-platform" \
-  --namespace ai-platform --create-namespace --wait --timeout 15m
+  --namespace ai-platform --wait --timeout 15m
 
 echo "Installing KRO templates"
 $HELM upgrade --install qsint-kro-templates "$ROOT_DIR/charts/qsint-kro-templates" \

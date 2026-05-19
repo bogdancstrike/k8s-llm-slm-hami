@@ -14,20 +14,3 @@ metadata:
   labels:
     pod-security.kubernetes.io/enforce: privileged
     purpose: model-serving
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kserve
-  labels:
-    control-plane: kserve-controller-manager
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kro-system
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: hami-system

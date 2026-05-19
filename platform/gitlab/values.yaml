@@ -35,9 +35,9 @@ global:
     backups:
       enabled: false
 
+installCertmanager: false
+
 # --- Disable bundled subcharts we don't need / already have ---
-certmanager:
-  install: false
 nginx-ingress:
   enabled: false
 prometheus:

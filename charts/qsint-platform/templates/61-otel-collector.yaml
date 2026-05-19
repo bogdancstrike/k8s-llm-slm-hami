@@ -59,11 +59,6 @@ data:
       k8sattributes:
         auth_type: serviceAccount
         passthrough: false
-        filter:
-          # Only enrich spans from these namespaces
-          namespaces:
-            - ai-platform
-            - inference
         extract:
           metadata:
             - k8s.namespace.name

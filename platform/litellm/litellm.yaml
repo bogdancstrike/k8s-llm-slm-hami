@@ -84,6 +84,17 @@ spec:
       labels:
         app: litellm
     spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres.ai-platform.svc.cluster.local -U platform; do
+                echo "Waiting for postgres..."
+                sleep 3
+              done
       containers:
         - name: litellm
           image: ghcr.io/berriai/litellm:main-v1.52.0-stable

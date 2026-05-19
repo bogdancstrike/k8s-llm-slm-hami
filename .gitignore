@@ -1,0 +1,57 @@
+# --- OS / editor junk ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# --- IDEs ---
+.idea/
+.vscode/
+*.iml
+.project
+.classpath
+.settings/
+
+# --- Python (tests/) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Helm artifacts ---
+# Lock files and packaged dependencies are pulled with `helm dependency update`.
+charts/*/Chart.lock
+charts/*/charts/*.tgz
+charts/*/tmpcharts/
+*.tgz
+
+# --- Local secrets / env ---
+.env
+.env.*
+!.env.example
+secrets.yaml
+*-secret.local.yaml
+kubeconfig
+*.kubeconfig
+
+# --- Logs and tmp ---
+*.log
+logs/
+tmp/
+*.tmp
+*.bak
+
+# --- Claude Code / agents scratch ---
+.claude/
+.superpowers/

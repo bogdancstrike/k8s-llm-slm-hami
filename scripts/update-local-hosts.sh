@@ -9,6 +9,8 @@ HOSTS=(
   langfuse.local.ro
   jaeger.local.ro
   litellm.local.ro
+  minio.local.ro
+  kas.local.ro
 )
 
 for host in "${HOSTS[@]}"; do

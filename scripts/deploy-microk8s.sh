@@ -161,9 +161,9 @@ $HELM upgrade --install kserve "$ROOT_DIR/charts/qsint-kserve" \
   --namespace kserve --wait --timeout 10m
 
 echo "Installing GitLab"
-$HELM upgrade --install gitlab "$ROOT_DIR/platform/gitlab/gitlab" \
+$HELM upgrade --install gitlab "$ROOT_DIR/charts/qsint-gitlab" \
   --namespace gitlab --create-namespace \
-  --values "$ROOT_DIR/platform/gitlab/values.yaml" \
+  --values "$ROOT_DIR/charts/qsint-gitlab/qsint-values.yaml" \
   --wait --timeout 30m
 
 echo "Installing QSINT namespaces"

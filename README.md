@@ -28,6 +28,61 @@
 
 ---
 
+## Local UI access and credentials
+
+Run the host setup helper once on the workstation where the browser runs:
+
+```bash
+sudo ./scripts/update-local-hosts.sh
+```
+
+This maps the local MicroK8s ingress hosts to `127.0.0.1`.
+
+| UI / endpoint | URI | Username / email | Password / key |
+|---|---|---|---|
+| Argo CD | http://argocd.local.ro | `admin` | `XexABNTzC9IMf5S8` |
+| GitLab | http://gitlab.local.ro | `root` | `Uq6jF9veWolrYF3svwqyrJwS8cCYp9oeIOJEBrlMD5iiOaq7bh0j5aSZ6gfvz9Am` |
+| GitLab MinIO | http://minio.local.ro | `CVoEGEWWNmV6DtFyqCX4ij55w2WPhXuV3HSo5Eu9WqvhFDG1oPUOqQUecFesSd1B` | `NfiiFDSg9vOpVL4YYNrcf0esoxPh5y9dVS3jy11jSTgd37U518BykrLp4KWriJ0l` |
+| GitLab KAS | http://kas.local.ro | N/A | N/A |
+| Grafana | http://grafana.local.ro | `admin` | `admin` |
+| Open WebUI | http://open-webui.local.ro | Create first account in UI | Chosen during first signup |
+| Langfuse | http://langfuse.local.ro | Create first account in UI | Chosen during first signup |
+| Jaeger | http://jaeger.local.ro | N/A | N/A |
+| LiteLLM API / admin | http://litellm.local.ro | N/A | Bearer `sk-litellm-master-change-me` |
+
+Credential retrieval commands:
+
+```bash
+# Argo CD admin password
+microk8s kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
+
+# GitLab root password
+microk8s kubectl -n gitlab get secret gitlab-initial-root-password \
+  -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
+
+# GitLab MinIO access key and secret key
+microk8s kubectl -n gitlab get secret gitlab-minio-secret \
+  -o go-template='{{"accesskey="}}{{index .data "accesskey" | base64decode}}{{"\nsecretkey="}}{{index .data "secretkey" | base64decode}}{{"\n"}}'
+
+# Grafana admin password
+microk8s kubectl -n observability get secret kube-prom-stack-grafana \
+  -o go-template='{{index .data "admin-password" | base64decode}}{{"\n"}}'
+
+# LiteLLM bearer key
+microk8s kubectl -n ai-platform get secret litellm-secrets \
+  -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}{{"\n"}}'
+```
+
+Notes:
+
+- Open WebUI and Langfuse do not have static chart-defined UI users. The first account created in each UI becomes the initial admin.
+- LiteLLM uses bearer-token auth: `Authorization: Bearer <LITELLM_MASTER_KEY>`.
+- Jaeger and GitLab KAS have no browser login in this PoC. KAS is the GitLab agent server endpoint, not a human UI.
+- PoC credentials are intentionally simple and stored in local Kubernetes secrets. Rotate every value before using this outside the local lab.
+
+---
+
 ## 1. Scop și context
 
 ### 1.1 Ce face acest PoC
@@ -1775,13 +1830,19 @@ qsint-ai-platform/
 
 ### B. Endpoint-uri și porturi expuse
 
-| Serviciu | Port intern | NodePort | Acces |
+Toate UI-urile sunt expuse prin MicroK8s ingress pe hostnames locale. Rulează `sudo ./scripts/update-local-hosts.sh`, apoi folosește tabelul [Local UI access and credentials](#local-ui-access-and-credentials).
+
+| Serviciu | Namespace | Port intern | Ingress local |
 |---|---|---|---|
-| Open WebUI | 8080 | 30080 | http://node-ip:30080 |
-| Langfuse | 3000 | 30030 | http://node-ip:30030 |
-| Jaeger UI | 16686 | 30686 | http://node-ip:30686 |
-| Grafana | 3000 | (din kube-prom-stack) | http://node-ip:<grafana-nodeport> |
-| LiteLLM API | 4000 | (port-forward) | localhost:4000 |
+| Argo CD | `argocd` | 8080/443 | http://argocd.local.ro |
+| GitLab | `gitlab` | 8181 | http://gitlab.local.ro |
+| GitLab MinIO | `gitlab` | 9000 | http://minio.local.ro |
+| GitLab KAS | `gitlab` | 8150 | http://kas.local.ro |
+| Grafana | `observability` | 3000 | http://grafana.local.ro |
+| Open WebUI | `ai-platform` | 8080 | http://open-webui.local.ro |
+| Langfuse | `ai-platform` | 3000 | http://langfuse.local.ro |
+| Jaeger UI | `ai-platform` | 16686 | http://jaeger.local.ro |
+| LiteLLM API / admin | `ai-platform` | 4000 | http://litellm.local.ro |
 
 ### C. Tools comands cheat-sheet
 

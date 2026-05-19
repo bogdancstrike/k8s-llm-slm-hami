@@ -1,0 +1,38 @@
+# Patterns to ignore when packaging Helm charts.
+# Applies to charts that symlink/copy this file via per-chart .helmignore.
+#
+# VCS
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp
+*~
+
+# Build / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# CI / dev configs
+.github/
+.gitlab-ci.yml
+.circleci/
+
+# Markdown / docs not needed inside the packaged chart
+OWNERS
+OWNERS_ALIASES
+*.tgz

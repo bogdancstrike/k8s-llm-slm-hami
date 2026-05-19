@@ -1,0 +1,1649 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__elements": [],
+  "__requires": [
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "8.0.1"
+    },
+    {
+      "type": "panel",
+      "id": "graph",
+      "name": "Graph (old)",
+      "version": ""
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Knative Serving - Revision HTTP Requests (KServe version)",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 35,
+      "panels": [],
+      "title": "Service Request Stats from Gateway",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 25,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[5m])) by (le, destination_workload, destination_workload_namespace, destination_service))",
+          "format": "time_series",
+          "interval": "",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[5m])) by (le, destination_workload, destination_workload_namespace, destination_service))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[5m])) by (le, destination_workload, destination_workload_namespace, destination_service))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p95",
+          "refId": "C"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[5m])) by (le, destination_workload, destination_workload_namespace, destination_service))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p99",
+          "refId": "D"
+        }
+      ],
+      "title": "Gateway latency",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 27,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "sum(increase(istio_requests_total{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[24h]))",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "legendFormat": "total requests",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "sum(increase(istio_requests_total{reporter=\"source\", destination_service=~\"$revision.$namespace.*\"}[24h])) by (response_code)",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "HTTP {{response_code}}",
+          "refId": "B"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "",
+          "refId": "C"
+        }
+      ],
+      "title": "Gateway Total requests in last 24h",
+      "type": "gauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 29,
+      "panels": [],
+      "title": "Service Resource Utilization",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "id": 31,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", pod=~\"$revision.*\"}[10m]))",
+          "interval": "",
+          "legendFormat": "cpu used",
+          "refId": "A"
+        }
+      ],
+      "title": "Revision CPU Usage (aggregated across replicas)",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "decbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "id": 33,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(container_memory_usage_bytes{namespace=\"$namespace\", pod=~\"$revision-deployment-.*\"})",
+          "interval": "",
+          "legendFormat": "Memory used",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(kube_pod_container_resource_limits{resource=\"memory\",unit=\"byte\", namespace=\"$namespace\", pod=~\"$revision-deployment-.*\"})",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Memory limit",
+          "refId": "B"
+        }
+      ],
+      "title": "Memory Used (aggregated across replicas)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 23,
+      "panels": [],
+      "title": "Service Concurrency Stats",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "id": 37,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_stable_request_concurrency{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "interval": "1s",
+          "legendFormat": "60 Second Average Concurrency",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_panic_request_concurrency{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "hide": false,
+          "interval": "1s",
+          "legendFormat": "6 Second Average Panic Concurrency",
+          "refId": "B"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_target_concurrency_per_pod{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "60 Second Target Concurrency",
+          "refId": "C"
+        }
+      ],
+      "title": "Observed Concurrency",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "id": 39,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_actual_pods{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "interval": "",
+          "legendFormat": "Actual Pods",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_requested_pods{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Requested Pods",
+          "refId": "B"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "sum(autoscaler_desired_pods{namespace_name=\"$namespace\", configuration_name=\"$configuration\", revision_name=\"$revision\"})",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Desired Pods",
+          "refId": "C"
+        }
+      ],
+      "title": "Actual/Requested/Desired Pods",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 8,
+      "panels": [],
+      "title": "Service Request stats (average over the selected time range)",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 41,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "interval": "",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.90, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p95",
+          "refId": "C"
+        },
+        {
+          "datasource": "$datasource",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.99, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "p99",
+          "refId": "D"
+        }
+      ],
+      "title": "Service Latency Stats(queue proxy)",
+      "type": "stat"
+    },
+    {
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "rgb(31, 120, 193)",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "N/A"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 28
+      },
+      "id": 2,
+      "links": [],
+      "maxDataPoints": 100,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "repeatDirection": "v",
+      "targets": [
+        {
+          "expr": "round(sum(rate(revision_request_count{namespace_name=\"$namespace\", revision_name=~\"$revision\", configuration_name=~\"$configuration\"}[10m])), 0.001)",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Volume",
+      "type": "stat"
+    },
+    {
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "rgb(31, 120, 193)",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "N/A"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d44a3a",
+                "value": null
+              },
+              {
+                "color": "rgba(237, 129, 40, 0.89)",
+                "value": 95
+              },
+              {
+                "color": "#299c46",
+                "value": 99
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 28
+      },
+      "id": 4,
+      "links": [],
+      "maxDataPoints": 100,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "expr": "sum(rate(revision_request_count{response_code_class!=\"5xx\", namespace_name=\"$namespace\", revision_name=~\"$revision\", configuration_name=~\"$configuration\"}[10m])) / sum(rate(revision_request_count{namespace_name=\"$namespace\", revision_name=~\"$revision\", configuration_name=~\"$configuration\"}[10m]))",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "refId": "A"
+        }
+      ],
+      "title": "Success Rate (non-5xx responses)",
+      "type": "stat"
+    },
+    {
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "rgb(31, 120, 193)",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "N/A"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 32
+      },
+      "id": 5,
+      "links": [],
+      "maxDataPoints": 100,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "expr": "sum(rate(revision_request_count{response_code_class=\"4xx\", namespace_name=\"$namespace\", revision_name=~\"$revision\", configuration_name=~\"$configuration\"}[10m])) ",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "refId": "A"
+        }
+      ],
+      "title": "4xx",
+      "type": "stat"
+    },
+    {
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "rgb(31, 120, 193)",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "N/A"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 32
+      },
+      "id": 9,
+      "links": [],
+      "maxDataPoints": 100,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.1",
+      "targets": [
+        {
+          "expr": "sum(rate(revision_request_count{response_code_class=\"5xx\", namespace_name=\"$namespace\", revision_name=~\"$revision\", configuration_name=~\"$configuration\"}[10m])) ",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "refId": "A"
+        }
+      ],
+      "title": "5xx",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "id": 11,
+      "panels": [],
+      "title": "Service Request Volume",
+      "type": "row"
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "links": []
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "hiddenSeries": false,
+      "id": 17,
+      "legend": {
+        "avg": false,
+        "current": false,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": false
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.1",
+      "pointradius": 5,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "label_replace(round(sum(rate(revision_request_count{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[2m])) by (revision_name), 0.001), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "hide": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{revision_name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "round(sum(rate(revision_request_count{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[2m])) by (revision_name), 0.001)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{revision_name}}",
+          "refId": "B"
+        }
+      ],
+      "thresholds": [],
+      "timeRegions": [],
+      "title": "Request Volume by Revision",
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "mode": "time",
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "ops",
+          "logBase": 1,
+          "show": true
+        },
+        {
+          "format": "short",
+          "logBase": 1,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "fieldConfig": {
+        "defaults": {
+          "links": []
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "hiddenSeries": false,
+      "id": 18,
+      "legend": {
+        "avg": false,
+        "current": false,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": false
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.1",
+      "pointradius": 5,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "datasource": "$datasource",
+          "exemplar": false,
+          "expr": "round(sum(rate(revision_request_count{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[2m])) by (response_code_class), 0.001)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{ response_code_class }}",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeRegions": [],
+      "title": "Request Volume by Response Code Class",
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "mode": "time",
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "logBase": 1,
+          "show": true
+        },
+        {
+          "format": "short",
+          "logBase": 1,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 15,
+      "panels": [],
+      "title": "Service Response Time",
+      "type": "row"
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "links": []
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "hiddenSeries": false,
+      "id": 20,
+      "legend": {
+        "alignAsTable": false,
+        "avg": false,
+        "current": false,
+        "hideEmpty": false,
+        "hideZero": false,
+        "max": false,
+        "min": false,
+        "rightSide": false,
+        "show": true,
+        "total": false,
+        "values": false
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null as zero",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.1",
+      "pointradius": 5,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{ revision_name }} (p50)",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{ revision_name }} (p90)",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(irate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{ revision_name }} (p95)",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(irate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\"}[5m])) by (revision_name, le))",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{ revision_name }} (p99)",
+          "refId": "D"
+        }
+      ],
+      "thresholds": [],
+      "timeRegions": [],
+      "title": "Response Time by Revision",
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "mode": "time",
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "ms",
+          "logBase": 1,
+          "show": true
+        },
+        {
+          "format": "short",
+          "logBase": 1,
+          "show": false
+        }
+      ],
+      "yaxis": {
+        "align": false
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "links": []
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "hiddenSeries": false,
+      "id": 21,
+      "legend": {
+        "alignAsTable": false,
+        "avg": true,
+        "current": false,
+        "hideEmpty": false,
+        "hideZero": false,
+        "max": false,
+        "min": false,
+        "rightSide": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.1",
+      "pointradius": 5,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "label_replace(histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"2xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "2xx (p50)",
+          "refId": "C"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"3xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "3xx (p50)",
+          "refId": "D"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"4xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "4xx (p50)",
+          "refId": "A"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.50, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"5xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "5xx (p50)",
+          "refId": "B"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.95, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"2xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "2xx (p95)",
+          "refId": "E"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.95, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"3xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "3xx (p95)",
+          "refId": "F"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.95, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"4xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "4xx (p95)",
+          "refId": "G"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.95, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"5xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "format": "time_series",
+          "intervalFactor": 1,
+          "legendFormat": "5xx (p95)",
+          "refId": "H"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.99, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"2xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "interval": "",
+          "legendFormat": "2xx(p99)",
+          "refId": "I"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.99, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"3xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "interval": "",
+          "legendFormat": "3xx(p99)",
+          "refId": "J"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.99, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"4xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "interval": "",
+          "legendFormat": "4xx(p99)",
+          "refId": "K"
+        },
+        {
+          "expr": "label_replace(histogram_quantile(0.99, sum(rate(revision_request_latencies_bucket{namespace_name=\"$namespace\", configuration_name=~\"$configuration\",revision_name=~\"$revision\",response_code_class=\"5xx\"}[5m])) by (le)), \"revision_name\", \"$2\", \"revision_name\", \"$configuration(-+)(.*)\")",
+          "interval": "",
+          "legendFormat": "5xx(p99)",
+          "refId": "L"
+        }
+      ],
+      "thresholds": [],
+      "timeRegions": [],
+      "title": "Response Time by Response Code Class",
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "mode": "time",
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "ms",
+          "logBase": 1,
+          "show": true
+        },
+        {
+          "format": "short",
+          "logBase": 1,
+          "show": false
+        }
+      ],
+      "yaxis": {
+        "align": false
+      }
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 30,
+  "style": "dark",
+  "tags": [
+    "kserve",
+    "knative"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "default",
+          "value": "default"
+        },
+        "hide": 0,
+        "label": "Datasource",
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": "$datasource",
+        "definition": "label_values(revision_request_count{namespace_name!=\"unknown\"}, namespace_name)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": {
+          "query": "label_values(revision_request_count{namespace_name!=\"unknown\"}, namespace_name)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "tagValuesQuery": "",
+        "tagsQuery": "",
+        "type": "query",
+        "useTags": false
+      },
+      {
+        "current": {},
+        "datasource": "$datasource",
+        "definition": "label_values(revision_request_count{namespace_name=\"$namespace\", configuration_name!=\"unknown\"}, configuration_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Configuration",
+        "multi": true,
+        "name": "configuration",
+        "options": [],
+        "query": {
+          "query": "label_values(revision_request_count{namespace_name=\"$namespace\", configuration_name!=\"unknown\"}, configuration_name)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "tagsQuery": "",
+        "type": "query",
+        "useTags": false
+      },
+      {
+        "current": {},
+        "datasource": "$datasource",
+        "definition": "label_values(revision_request_count{namespace_name=\"$namespace\", configuration_name=~\"$configuration\", revision_name!=\"unknown\"}, revision_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Revision",
+        "multi": true,
+        "name": "revision",
+        "options": [],
+        "query": {
+          "query": "label_values(revision_request_count{namespace_name=\"$namespace\", configuration_name=~\"$configuration\", revision_name!=\"unknown\"}, revision_name)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 2,
+        "tagValuesQuery": "",
+        "tagsQuery": "",
+        "type": "query",
+        "useTags": false
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "",
+  "title": "Knative Serving - Revision HTTP Requests (Kserve)",
+  "uid": "",
+  "version": 3,
+  "weekStart": "",
+  "gnetId": 18032
+}

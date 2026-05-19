@@ -665,11 +665,39 @@ Argo CD points at `gitlab.local.ro` and the workflow becomes air-gap-able.
 
 ### 7.3 Bundled Grafana dashboards
 
-Auto-imported via the Grafana sidecar from `charts/qsint-platform/files/dashboards/`:
+Auto-imported via the Grafana sidecar from `charts/qsint-platform/files/dashboards/`
+and published to the `qsint-ai-platform-dashboards` ConfigMap in the
+`observability` namespace.
+
+**Native QSINT dashboards** (always populated by this PoC):
 
 1. **QSINT — HAMi vGPU Per-Pod** — vRAM and compute share per pod, GPU temp/power, allocation table.
 2. **QSINT — vLLM Inference** — active/queued requests, TTFT / TPOT percentiles, KV-cache utilisation.
 3. **QSINT — LiteLLM Gateway** — request rate, error rate, p95 latency per model, token usage.
+
+**Official KServe dashboards** (per
+[kserve.github.io/website/docs/.../grafana-dashboards](https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/grafana-dashboards)):
+
+| ID | Dashboard | Populated by this PoC? |
+|---|---|---|
+| [17969](https://grafana.com/grafana/dashboards/17969) | KServe ModelServer Latency | **No** — needs the KServe Python ModelServer SDK runtimes (lgbserver, sklearn, xgb, …). Empty for vLLM / llama.cpp. |
+| [18026](https://grafana.com/grafana/dashboards/18026) | KServe TorchServe Latency | **No** — needs the TorchServe runtime. |
+| [18027](https://grafana.com/grafana/dashboards/18027) | KServe Triton Latency | **No** — needs the Triton Inference Server runtime. |
+| [18032](https://grafana.com/grafana/dashboards/18032) | Knative Serving Revision HTTP Requests | **No** — needs Knative-backed serverless KServe; we use RawDeployment. |
+
+The four official dashboards are bundled to keep the platform ready for those
+runtimes the moment they're added. They will start populating as soon as a
+matching `ClusterServingRuntime` is deployed; no further config needed.
+
+> **Scraping note.** Per [KServe's Prometheus metrics
+> docs](https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/prometheus-metrics),
+> the `request_predict_seconds` / `request_preprocess_seconds` / `request_explain_seconds`
+> histograms are emitted by KServe's Python ModelServer SDK only — vLLM and
+> llama.cpp emit their own metric families (`vllm:*`, `llamacpp_*`), which our
+> `vllm-inference-pods` PodMonitor already scrapes. The PodMonitor selects on
+> the standard `serving.kserve.io/inferenceservice` label, so any future
+> KServe SDK runtime is picked up automatically (and will populate dashboard
+> 17969).
 
 ### 7.4 Langfuse vs Jaeger — when to use which
 

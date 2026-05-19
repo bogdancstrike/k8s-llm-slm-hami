@@ -15,5 +15,22 @@ data:
 {{ .Files.Get "files/dashboards/vllm.json" | indent 4 }}
   litellm.json: |
 {{ .Files.Get "files/dashboards/litellm.json" | indent 4 }}
+  # KServe official dashboards
+  # Sources:
+  #   https://grafana.com/grafana/dashboards/17969 — ModelServer latency
+  #   https://grafana.com/grafana/dashboards/18026 — TorchServe latency
+  #   https://grafana.com/grafana/dashboards/18027 — Triton latency
+  #   https://grafana.com/grafana/dashboards/18032 — Knative-Serving HTTP
+  # See KServe docs:
+  #   https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/grafana-dashboards
+  #   https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/prometheus-metrics
+  kserve-modelserver-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-modelserver-latency.json" | indent 4 }}
+  kserve-torchserve-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-torchserve-latency.json" | indent 4 }}
+  kserve-triton-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-triton-latency.json" | indent 4 }}
+  knative-serving-http.json: |
+{{ .Files.Get "files/dashboards/knative-serving-http.json" | indent 4 }}
 ---
 {{ .Files.Get "files/dashboards/hami-native-dashboard.yaml" }}

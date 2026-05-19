@@ -45,7 +45,14 @@ data:
     litellm_settings:
       # Telemetry off — privacy
       telemetry: false
-      # Log all completions to Langfuse + emit OTLP traces to collector
+      # Log all completions to Langfuse + emit OTLP traces to collector.
+      #
+      # NOTE: the `prometheus` callback is LiteLLM Enterprise-only — adding it
+      # here makes the pod refuse to start without a LITELLM_LICENSE. Gateway
+      # request rates / latencies are therefore not scraped into Prometheus in
+      # this PoC; the QSINT LiteLLM dashboard is intentionally absent.
+      # Per-model metrics still come from vLLM's own /metrics, and per-request
+      # traces flow through OTLP → Jaeger.
       success_callback:
         - langfuse
         - otel

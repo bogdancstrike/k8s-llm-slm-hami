@@ -9,12 +9,22 @@ metadata:
   annotations:
     grafana_folder: {{ .Values.grafana.folder | quote }}
 data:
-  hami.json: |
-{{ .Files.Get "files/dashboards/hami.json" | indent 4 }}
+  # vLLM is scraped by the vllm-inference-pods PodMonitor; this dashboard
+  # populates as soon as either GPU model handles traffic.
   vllm.json: |
 {{ .Files.Get "files/dashboards/vllm.json" | indent 4 }}
-  litellm.json: |
-{{ .Files.Get "files/dashboards/litellm.json" | indent 4 }}
+  # NOTE: A QSINT HAMi dashboard was removed because the metric names it
+  # assumed (`hami_vgpu_memory_used_bytes`, etc.) don't exist; the upstream
+  # `HAMi GPU Split — Native Metrics` dashboard below already covers vRAM,
+  # core %, per-pod allocation, and host-level GPU stats using the real
+  # `vGPU_device_memory_*`, `HostCoreUtilization`, `vGPUMemoryAllocated`
+  # series that the HAMi scheduler + device plugin emit.
+  #
+  # NOTE: A QSINT LiteLLM dashboard was removed because LiteLLM's
+  # `prometheus` callback is Enterprise-only in v1.52.0-stable — enabling
+  # it makes the pod fail to start without a LITELLM_LICENSE. Gateway-
+  # level traces still flow through OTLP into Jaeger, and per-model
+  # numbers come from the vLLM / llama.cpp pods directly.
   # KServe official dashboards
   # Sources:
   #   https://grafana.com/grafana/dashboards/17969 — ModelServer latency

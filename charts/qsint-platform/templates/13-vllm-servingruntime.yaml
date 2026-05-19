@@ -36,25 +36,35 @@ spec:
     - name: kserve-container
       image: vllm/vllm-openai:v0.6.3
       command:
-        - python3
-        - -m
-        - vllm.entrypoints.openai.api_server
+        - /bin/sh
+        - -c
       args:
-        - "--port=8000"
-        - "--host=0.0.0.0"
-        - "--model=$(MODEL_ID)"
-        - "--served-model-name=$(SERVED_NAME)"
-        - "--quantization=$(QUANTIZATION)"
-        - "--max-model-len=$(MAX_MODEL_LEN)"
-        - "--gpu-memory-utilization=$(GPU_MEM_UTIL)"
-        - "--dtype=auto"
-        - "--trust-remote-code"
-        - "--enable-prefix-caching"
-        - "--disable-log-requests"
-        # OpenTelemetry tracing — exports per-request spans with prefill/decode timing
-        - "--otlp-traces-endpoint=$(OTEL_EXPORTER_OTLP_ENDPOINT)"
-        # vLLM tag for span service name (overridden in InferenceService env)
-        - "--collect-detailed-traces=all"
+        - |
+          set -e
+
+          if ! python3 -c "import opentelemetry.sdk, opentelemetry.exporter.otlp.proto.grpc.trace_exporter, opentelemetry.semconv_ai" >/dev/null 2>&1; then
+            echo "Installing OpenTelemetry packages required by vLLM tracing..."
+            python3 -m pip install --no-cache-dir \
+              "opentelemetry-api>=1.26.0,<1.27.0" \
+              "opentelemetry-sdk>=1.26.0,<1.27.0" \
+              "opentelemetry-exporter-otlp>=1.26.0,<1.27.0" \
+              "opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0"
+          fi
+
+          exec python3 -m vllm.entrypoints.openai.api_server \
+            --port=8000 \
+            --host=0.0.0.0 \
+            --model="$${MODEL_ID}" \
+            --served-model-name="$${SERVED_NAME}" \
+            --quantization="$${QUANTIZATION}" \
+            --max-model-len="$${MAX_MODEL_LEN}" \
+            --gpu-memory-utilization="$${GPU_MEM_UTIL}" \
+            --dtype=auto \
+            --trust-remote-code \
+            --enable-prefix-caching \
+            --disable-log-requests \
+            --otlp-traces-endpoint="$${OTEL_EXPORTER_OTLP_ENDPOINT}" \
+            --collect-detailed-traces=all
 
       ports:
         - containerPort: 8000

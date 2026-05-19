@@ -1,0 +1,12 @@
+argo-cd:
+  configs:
+    params:
+      server.insecure: true
+  server:
+    ingress:
+      enabled: true
+      ingressClassName: public
+      hostname: argocd.local.ro
+      path: /
+      pathType: Prefix
+      tls: false

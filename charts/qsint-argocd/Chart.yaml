@@ -1,0 +1,9 @@
+apiVersion: v2
+name: qsint-argocd
+description: Wrapper for Argo CD with local HTTP ingress.
+type: application
+version: 0.1.0
+dependencies:
+  - name: argo-cd
+    version: 7.8.2
+    repository: https://argoproj.github.io/argo-helm

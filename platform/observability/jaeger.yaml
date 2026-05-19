@@ -1,0 +1,153 @@
+---
+# Jaeger all-in-one — collector, query UI, and in-memory storage in one pod.
+#
+# PoC trade-offs:
+#   - In-memory storage: ~50k spans capacity, lost on pod restart
+#   - Single pod: not HA
+#   - For prod (QSINT): use Jaeger Production with Elasticsearch backend
+#     (reuse your existing QSINT Elasticsearch cluster)
+#
+# Exposed endpoints:
+#   - 16686 (HTTP)   — Query UI
+#   - 4317  (gRPC)   — OTLP receiver
+#   - 4318  (HTTP)   — OTLP receiver
+#   - 14250 (gRPC)   — Jaeger legacy collector
+#   - 14268 (HTTP)   — Jaeger legacy collector (thrift)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: ai-platform
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "14269"
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.62.0
+          args:
+            # Enable OTLP receiver (gRPC + HTTP)
+            - "--collector.otlp.enabled=true"
+            # Memory storage capacity (max spans kept)
+            - "--memory.max-traces=50000"
+            # Enable Prometheus metrics endpoint
+            - "--metrics-backend=prometheus"
+            - "--query.base-path=/"
+            # Log level
+            - "--log-level=info"
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: "memory"
+          ports:
+            - containerPort: 16686
+              name: query
+              protocol: TCP
+            - containerPort: 4317
+              name: otlp-grpc
+              protocol: TCP
+            - containerPort: 4318
+              name: otlp-http
+              protocol: TCP
+            - containerPort: 14250
+              name: grpc-thrift
+              protocol: TCP
+            - containerPort: 14268
+              name: thrift-http
+              protocol: TCP
+            - containerPort: 14269
+              name: admin-http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 14269
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 14269
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+# Internal service for OTel Collector to send to
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-collector
+  namespace: ai-platform
+  labels:
+    app: jaeger
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+    - name: grpc-thrift
+      port: 14250
+      targetPort: 14250
+    - name: thrift-http
+      port: 14268
+      targetPort: 14268
+  type: ClusterIP
+---
+# Query UI service — ingress exposes this at http://jaeger.local.ro
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+  namespace: ai-platform
+  labels:
+    app: jaeger
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: query
+      port: 16686
+      targetPort: 16686
+  type: ClusterIP
+---
+# ServiceMonitor for Jaeger internal metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jaeger
+  namespace: ai-platform
+  labels:
+    release: kube-prom-stack
+spec:
+  selector:
+    matchLabels:
+      app: jaeger
+  endpoints:
+    - port: admin-http
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,42 @@
+---
+# SmolLM3-3B — HuggingFace TB's small but capable model.
+#
+# vRAM budget:
+#   Weights (AWQ INT4):       ~1.8 GB
+#   KV cache (max_len=2048):  ~1.0 GB
+#   Activations + CUDA ctx:   ~1.8 GB
+#   ─────────────────────────────────
+#   Total:                    ~4.6 GB  → fits in 5GB HAMi slice (tight)
+#
+# Not gated — no HuggingFace token required. Public model.
+apiVersion: kro.run/v1alpha1
+kind: InferenceEndpoint
+metadata:
+  name: smollm3-3b
+  namespace: inference
+spec:
+  # Backend selection — GPU inference via vLLM
+  backend: vllm
+
+  model: "HuggingFaceTB/SmolLM3-3B"
+  servedName: "smollm3-3b"
+
+  gpuMemMb: 5000
+  gpuMemPercentage: 45
+  gpuCorePercent: 45
+
+  # SmolLM3 has AWQ community quants. Verify availability or use base FP16
+  # (will fit weights but KV cache becomes tight — reduce maxModelLen to 1024).
+  quantization: "awq"
+  maxModelLen: 2048
+  gpuMemUtilization: "0.80"
+
+  cpuRequest: "1"
+  cpuLimit: "2"
+  memoryRequest: "4Gi"
+  memoryLimit: "8Gi"
+
+  minReplicas: 1
+  maxReplicas: 1
+
+  litellmAlias: "smollm3-3b-quality"

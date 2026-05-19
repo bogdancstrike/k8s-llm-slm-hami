@@ -1,0 +1,6 @@
+apiVersion: v2
+name: qsint-kro-templates
+description: KRO ResourceGraphDefinitions for the QSINT AI platform.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

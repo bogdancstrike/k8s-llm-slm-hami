@@ -1,0 +1,276 @@
+---
+# KRO ResourceGraphDefinition — InferenceEndpoint CRD with multi-backend support.
+#
+# Supports two backends:
+#   - backend: vllm     → GPU inference via KServe + vLLM ClusterServingRuntime
+#                         Uses HAMi vGPU partitioning
+#   - backend: llamacpp → CPU inference via KServe + llama.cpp ClusterServingRuntime
+#                         No GPU resources requested
+#
+# The schema is unified — all fields are optional with sensible defaults.
+# Developer fills only what's relevant for their chosen backend.
+#
+# Example minimal usage:
+#
+# # GPU model (vLLM backend, default):
+# apiVersion: kro.run/v1alpha1
+# kind: InferenceEndpoint
+# metadata: {name: gemma-1b, namespace: inference}
+# spec:
+#   backend: vllm
+#   model: "google/gemma-3-1b-it"
+#   gpuMemMb: 5000
+#   litellmAlias: "gemma-1b-fast"
+#
+# # CPU model (llama.cpp backend):
+# apiVersion: kro.run/v1alpha1
+# kind: InferenceEndpoint
+# metadata: {name: qwen-cpu, namespace: inference}
+# spec:
+#   backend: llamacpp
+#   modelFile: "qwen2.5-3b-instruct-q4_k_m.gguf"
+#   modelUrl: "https://huggingface.co/.../qwen2.5-3b-instruct-q4_k_m.gguf"
+#   cpuLimit: "8"
+#   memoryLimit: "8Gi"
+#   litellmAlias: "qwen-cpu-3b"
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: inference-endpoint
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: InferenceEndpoint
+    spec:
+      # ─── Backend selection ─────────────────────────────────────────────
+      # "vllm" (default) — GPU inference via vLLM runtime (HuggingFace model ID)
+      # "llamacpp"       — CPU inference via llama.cpp runtime (GGUF file)
+      backend: string | default="vllm" | enum="vllm,llamacpp"
+
+      # ─── Common fields ─────────────────────────────────────────────────
+      # Internal name used by the runtime's --served-model-name (vLLM) / --alias (llama.cpp)
+      servedName: string | default="default"
+
+      # Pod sizing — both backends use these
+      cpuRequest: string | default="2"
+      cpuLimit: string | default="4"
+      memoryRequest: string | default="4Gi"
+      memoryLimit: string | default="8Gi"
+
+      # Autoscaling
+      minReplicas: integer | default=1
+      maxReplicas: integer | default=1
+
+      # LiteLLM model alias — clients use this name in /v1/chat/completions
+      litellmAlias: string | required=true
+
+      # ─── vLLM-specific fields (used when backend=vllm) ─────────────────
+      # HuggingFace model ID (e.g. "google/gemma-3-1b-it"). REQUIRED for vllm.
+      model: string | default=""
+
+      # HAMi vGPU sizing — only applied when backend=vllm.
+      # gpuMemMb is retained for docs/backward compatibility; MicroK8s HAMi
+      # v2.8 uses gpumem-percentage to avoid Kubernetes quantity coercion.
+      gpuMemMb: integer | default=5000
+      gpuMemPercentage: integer | default=45
+      gpuCorePercent: integer | default=50
+
+      # vLLM tuning
+      quantization: string | default="awq"
+      maxModelLen: integer | default=2048
+      gpuMemUtilization: string | default="0.85"
+
+      # ─── llama.cpp-specific fields (used when backend=llamacpp) ────────
+      # GGUF filename inside the model cache PVC (e.g. "qwen2.5-3b-instruct-q4_k_m.gguf")
+      modelFile: string | default=""
+
+      # URL to download the GGUF file from (typically HuggingFace direct link)
+      # If file already exists in cache, download is skipped
+      modelUrl: string | default=""
+
+      # llama.cpp tuning
+      ctxSize: integer | default=2048
+      threads: integer | default=6
+      batchSize: integer | default=512
+
+    # Status — surfaces underlying resource state on the InferenceEndpoint CR
+    status:
+      endpointUrl: ${kserveInferenceService.status.url}
+      ready: '${kserveInferenceService.status.conditions[?@.type=="Ready"].status}'
+      registeredInLiteLLM: ${litellmRegisterJob.status.succeeded}
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Resources — KRO generates these for every InferenceEndpoint CR
+  # ───────────────────────────────────────────────────────────────────────
+  resources:
+
+    # ─── KServe InferenceService ─────────────────────────────────────────
+    # The template handles BOTH backends via ${schema.spec.backend} interpolation.
+    # KServe matches runtime via modelFormat.name → vllm-runtime OR llamacpp-runtime.
+    - id: kserveInferenceService
+      template:
+        apiVersion: serving.kserve.io/v1beta1
+        kind: InferenceService
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+          annotations:
+            serving.kserve.io/deploymentMode: "RawDeployment"
+            serving.kserve.io/autoscalerClass: "hpa"
+            serving.kserve.io/metrics: "concurrency"
+            serving.kserve.io/target: "10"
+            # Mark backend in annotations for observability (Grafana labels, etc.)
+            qsint.ai-platform/backend: ${schema.spec.backend}
+        spec:
+          predictor:
+            minReplicas: ${schema.spec.minReplicas}
+            maxReplicas: ${schema.spec.maxReplicas}
+            model:
+              # KRO interpolates backend into modelFormat.name.
+              # KServe then matches: vllm → vllm-runtime, gguf → llamacpp-runtime.
+              # Note: we map "llamacpp" backend to "gguf" modelFormat for KServe.
+              modelFormat:
+                # CEL ternary: backend == "vllm" ? "vllm" : "gguf"
+                name: '${schema.spec.backend == "vllm" ? "vllm" : "gguf"}'
+              # Map backend → runtime name
+              runtime: '${schema.spec.backend == "vllm" ? "vllm-runtime" : "llamacpp-runtime"}'
+
+              # ─── Environment variables ─────────────────────────────────
+              # Both sets of env vars are passed. The respective runtime ignores
+              # the irrelevant ones (vLLM ignores MODEL_FILE, llama.cpp ignores MODEL_ID).
+              # This avoids CEL conditional list construction which is fragile.
+              env:
+                # vLLM env vars
+                - name: MODEL_ID
+                  value: ${schema.spec.model}
+                - name: SERVED_NAME
+                  value: ${schema.spec.servedName}
+                - name: QUANTIZATION
+                  value: ${schema.spec.quantization}
+                - name: MAX_MODEL_LEN
+                  value: ${string(schema.spec.maxModelLen)}
+                - name: GPU_MEM_UTIL
+                  value: ${schema.spec.gpuMemUtilization}
+                # llama.cpp env vars
+                - name: MODEL_FILE
+                  value: ${schema.spec.modelFile}
+                - name: MODEL_URL
+                  value: ${schema.spec.modelUrl}
+                - name: CTX_SIZE
+                  value: ${string(schema.spec.ctxSize)}
+                - name: THREADS
+                  value: ${string(schema.spec.threads)}
+                - name: BATCH_SIZE
+                  value: ${string(schema.spec.batchSize)}
+
+              # ─── Resources ─────────────────────────────────────────────
+              # CEL conditional: GPU resources ONLY when backend=vllm.
+              # When backend=llamacpp, nvidia.com/* keys are simply absent.
+              # KServe ServingRuntime defaults take over (which for llamacpp-runtime
+              # request only CPU+memory, no GPU).
+              resources:
+                requests:
+                  cpu: ${schema.spec.cpuRequest}
+                  memory: ${schema.spec.memoryRequest}
+                  # Only request GPU when vLLM. CEL: backend == "vllm" ? "1" : "0"
+                  # KServe/Kubernetes interpret resource value "0" as "don't request".
+                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? "1" : "0"}'
+                  nvidia.com/gpumem-percentage: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuMemPercentage) : "0"}'
+                  nvidia.com/gpucores: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCorePercent) : "0"}'
+                limits:
+                  cpu: ${schema.spec.cpuLimit}
+                  memory: ${schema.spec.memoryLimit}
+                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? "1" : "0"}'
+                  nvidia.com/gpumem-percentage: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuMemPercentage) : "0"}'
+                  nvidia.com/gpucores: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCorePercent) : "0"}'
+
+    # ─── LiteLLM registration Job ────────────────────────────────────────
+    # Works identically for both backends — both expose OpenAI-compatible APIs.
+    # The Job waits for the predictor endpoint to respond on /v1/models, then
+    # POSTs to LiteLLM /model/new.
+    - id: litellmRegisterJob
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}-litellm-register
+          namespace: ${schema.metadata.namespace}
+          annotations:
+            kro.run/recreate-on-update: "true"
+        spec:
+          backoffLimit: 10
+          ttlSecondsAfterFinished: 3600
+          template:
+            spec:
+              restartPolicy: OnFailure
+              containers:
+                - name: register
+                  image: curlimages/curl:8.10.1
+                  env:
+                    # KRO interpolates these at apply time
+                    - name: MODEL_URL
+                      value: "http://${schema.metadata.name}-predictor.${schema.metadata.namespace}.svc.cluster.local"
+                    - name: LITELLM_URL
+                      value: "http://litellm.ai-platform.svc.cluster.local:4000"
+                    - name: LITELLM_ALIAS
+                      value: ${schema.spec.litellmAlias}
+                    - name: SERVED_NAME
+                      value: ${schema.spec.servedName}
+                    - name: MODEL_ID_TAG
+                      value: ${schema.metadata.name}
+                    - name: BACKEND
+                      value: ${schema.spec.backend}
+                    # Description shows the source (HF model ID for vLLM, GGUF file for llama.cpp)
+                    - name: MODEL_DESC
+                      value: "${schema.spec.backend == 'vllm' ? schema.spec.model : schema.spec.modelFile}"
+                    - name: LITELLM_MASTER_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: litellm-secrets
+                          key: LITELLM_MASTER_KEY
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      set -eu
+
+                      echo "Waiting for $MODEL_URL/v1/models to become reachable..."
+                      i=0
+                      while [ $i -lt 120 ]; do
+                        if curl -sf -o /dev/null "$MODEL_URL/v1/models"; then
+                          echo "Model endpoint ready after $i attempts"
+                          break
+                        fi
+                        i=$((i+1))
+                        sleep 10
+                      done
+
+                      if [ $i -eq 120 ]; then
+                        echo "ERROR: Model endpoint never became ready"
+                        exit 1
+                      fi
+
+                      echo "Registering model with LiteLLM proxy..."
+                      PAYLOAD=$(cat <<JSON
+                      {
+                        "model_name": "$LITELLM_ALIAS",
+                        "litellm_params": {
+                          "model": "openai/$SERVED_NAME",
+                          "api_base": "$MODEL_URL/v1",
+                          "api_key": "dummy-not-required-for-self-hosted"
+                        },
+                        "model_info": {
+                          "id": "$MODEL_ID_TAG",
+                          "description": "$MODEL_DESC via KServe + $BACKEND ($(if [ "$BACKEND" = "vllm" ]; then echo "GPU"; else echo "CPU"; fi))"
+                        }
+                      }
+                      JSON
+                      )
+
+                      curl -sf -X POST "$LITELLM_URL/model/new" \
+                        -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                        -H "Content-Type: application/json" \
+                        -d "$PAYLOAD"
+
+                      echo ""
+                      echo "Model registered successfully ($BACKEND backend)."

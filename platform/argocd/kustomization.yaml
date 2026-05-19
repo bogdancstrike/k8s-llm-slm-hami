@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-appproject.yaml
+  - 01-application-platform.yaml
+  - 02-application-workloads.yaml
+  - 03-application-kro-templates.yaml

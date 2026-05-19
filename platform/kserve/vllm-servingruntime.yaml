@@ -1,0 +1,165 @@
+---
+# vLLM ClusterServingRuntime
+#
+# Critical design choices:
+# 1. schedulerName: hami-scheduler — REQUIRED for HAMi vRAM partitioning to work.
+#    Without this, default-scheduler runs the pod and HAMi accounting is bypassed.
+# 2. Resource limits here are DEFAULTS — KRO Template overrides them per model
+#    via InferenceService.spec.predictor.model.resources.
+# 3. We DON'T use KServe's storage initializer (modelcar/PVC download). vLLM downloads
+#    directly from HuggingFace at runtime — simpler for PoC. For production, swap to
+#    OCI modelcar or pre-baked PVC.
+# 4. Env vars (MODEL_ID, MAX_MODEL_LEN etc) are templated into args. Overridden per
+#    InferenceService via env injection by KRO.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: vllm-runtime
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8000"
+
+  supportedModelFormats:
+    - name: vllm
+      version: "1"
+      autoSelect: true
+      priority: 1
+
+  protocolVersions:
+    - v2
+
+  # Force pod onto HAMi scheduler — critical for vRAM partitioning
+  schedulerName: hami-scheduler
+
+  containers:
+    - name: kserve-container
+      image: vllm/vllm-openai:v0.6.3
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - "--port=8000"
+        - "--host=0.0.0.0"
+        - "--model=$(MODEL_ID)"
+        - "--served-model-name=$(SERVED_NAME)"
+        - "--quantization=$(QUANTIZATION)"
+        - "--max-model-len=$(MAX_MODEL_LEN)"
+        - "--gpu-memory-utilization=$(GPU_MEM_UTIL)"
+        - "--dtype=auto"
+        - "--trust-remote-code"
+        - "--enable-prefix-caching"
+        - "--disable-log-requests"
+        # OpenTelemetry tracing — exports per-request spans with prefill/decode timing
+        - "--otlp-traces-endpoint=$(OTEL_EXPORTER_OTLP_ENDPOINT)"
+        # vLLM tag for span service name (overridden in InferenceService env)
+        - "--collect-detailed-traces=all"
+
+      ports:
+        - containerPort: 8000
+          protocol: TCP
+          name: http
+
+      env:
+        # Defaults — overridden per-InferenceService by KRO template
+        - name: MODEL_ID
+          value: "google/gemma-3-1b-it"
+        - name: SERVED_NAME
+          value: "default"
+        - name: QUANTIZATION
+          value: "awq"
+        - name: MAX_MODEL_LEN
+          value: "2048"
+        - name: GPU_MEM_UTIL
+          value: "0.85"
+        - name: HF_HOME
+          value: /models/.cache/huggingface
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: huggingface-token
+              key: token
+              optional: true
+        - name: VLLM_LOGGING_LEVEL
+          value: INFO
+        - name: NCCL_DEBUG
+          value: WARN
+        # ─── OpenTelemetry tracing config ─────────────────────────────────
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.ai-platform.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: "grpc"
+        - name: OTEL_EXPORTER_OTLP_INSECURE
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "vllm-inference"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.namespace=inference,deployment.environment=poc"
+        - name: OTEL_TRACES_SAMPLER
+          value: "always_on"
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+
+      resources:
+        # Defaults — KRO overrides via InferenceService.spec.predictor.model.resources
+        requests:
+          cpu: "2"
+          memory: 8Gi
+          nvidia.com/gpu: 1
+          nvidia.com/gpumem-percentage: "45"
+          nvidia.com/gpucores: "45"
+        limits:
+          cpu: "4"
+          memory: 16Gi
+          nvidia.com/gpu: 1
+          nvidia.com/gpumem-percentage: "45"
+          nvidia.com/gpucores: "45"
+
+      volumeMounts:
+        - name: model-cache
+          mountPath: /models
+        - name: shm
+          mountPath: /dev/shm
+
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 600
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 120
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 30
+
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        failureThreshold: 80   # Up to ~20min for cold model download
+        timeoutSeconds: 10
+
+  volumes:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-cache-pvc
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi

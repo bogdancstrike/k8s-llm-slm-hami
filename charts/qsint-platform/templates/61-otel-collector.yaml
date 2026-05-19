@@ -1,0 +1,320 @@
+---
+# OpenTelemetry Collector — centralized aggregation point.
+#
+# Architecture:
+#   All clients (LiteLLM, vLLM) → OTLP → Collector → Jaeger (traces)
+#                                                  → Prometheus (metrics scrape)
+#
+# Benefits over direct-to-Jaeger:
+#   - Single point to change exporters (add Tempo, Datadog, etc. without touching clients)
+#   - k8sattributes processor auto-enriches spans with pod/namespace/node info
+#   - Batch processor reduces network overhead
+#   - Memory_limiter prevents OOM under load spikes
+#   - Tail sampling possible later (e.g., keep only 10% of successful traces,
+#     100% of errors)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: ai-platform
+data:
+  collector.yaml: |
+    receivers:
+      # Accept OTLP from any client (LiteLLM, vLLM, future services)
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+            cors:
+              allowed_origins:
+                - "http://*"
+                - "https://*"
+
+      # Scrape Prometheus metrics from key targets and re-export as OTLP
+      # (optional — useful if you want metrics + traces correlated)
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'otel-collector-self'
+              scrape_interval: 30s
+              static_configs:
+                - targets: ['localhost:8888']
+
+    processors:
+      # Limit memory usage to prevent OOM
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 128
+
+      # Batch spans before export — reduces network calls
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+        send_batch_max_size: 1024
+
+      # Enrich spans with Kubernetes context (pod, namespace, node, labels)
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        filter:
+          # Only enrich spans from these namespaces
+          namespaces:
+            - ai-platform
+            - inference
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.deployment.name
+            - k8s.node.name
+            - k8s.pod.start_time
+          labels:
+            - tag_name: app
+              key: app
+              from: pod
+            - tag_name: serving.kserve.io/inferenceservice
+              key: serving.kserve.io/inferenceservice
+              from: pod
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: connection
+
+      # Add common resource attributes
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: poc
+            action: upsert
+          - key: service.platform
+            value: qsint-ai-platform
+            action: upsert
+
+    exporters:
+      # Export traces to Jaeger via OTLP
+      otlp/jaeger:
+        endpoint: jaeger-collector.ai-platform.svc.cluster.local:4317
+        tls:
+          insecure: true
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 1000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      # Debug exporter — logs spans to stdout (helpful for PoC debugging)
+      # Remove or set verbosity=basic for production
+      debug:
+        verbosity: basic
+        sampling_initial: 5
+        sampling_thereafter: 200
+
+      # Prometheus exporter — expose metrics from collector itself
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        send_timestamps: true
+        metric_expiration: 180m
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      pprof:
+        endpoint: 0.0.0.0:1777
+      zpages:
+        endpoint: 0.0.0.0:55679
+
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [otlp/jaeger, debug]
+
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [prometheus, debug]
+
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+        logs:
+          level: info
+---
+# ServiceAccount with permissions for k8sattributes processor
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: ai-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+rules:
+  # k8sattributes processor needs to read pod metadata cluster-wide
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["extensions"]
+    resources: ["replicasets"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: ai-platform
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: ai-platform
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1   # For PoC. Prod: HPA-scaled, min 2 for HA
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.110.0
+          args:
+            - "--config=/etc/otel/collector.yaml"
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+              protocol: TCP
+            - containerPort: 4318
+              name: otlp-http
+              protocol: TCP
+            - containerPort: 8888
+              name: metrics
+              protocol: TCP
+            - containerPort: 8889
+              name: prom-export
+              protocol: TCP
+            - containerPort: 13133
+              name: health
+              protocol: TCP
+            - containerPort: 55679
+              name: zpages
+              protocol: TCP
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: ai-platform
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+    - name: prom-export
+      port: 8889
+      targetPort: 8889
+  type: ClusterIP
+---
+# ServiceMonitor — Prometheus scrapes collector self-metrics + exported metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: otel-collector
+  namespace: ai-platform
+  labels:
+    release: kube-prom-stack
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+    - port: prom-export
+      path: /metrics
+      interval: 30s

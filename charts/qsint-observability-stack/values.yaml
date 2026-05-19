@@ -1,0 +1,20 @@
+kube-prometheus-stack:
+  fullnameOverride: kube-prom-stack
+  prometheus:
+    prometheusSpec:
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+  grafana:
+    adminPassword: admin
+    sidecar:
+      dashboards:
+        enabled: true
+        searchNamespace: ALL
+    ingress:
+      enabled: true
+      ingressClassName: public
+      hosts:
+        - grafana.local.ro
+      path: /

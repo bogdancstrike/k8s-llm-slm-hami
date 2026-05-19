@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qsint-ai-platform-dashboards
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: {{ .Values.grafana.folder | quote }}
+data:
+  hami.json: |
+{{ .Files.Get "files/dashboards/hami.json" | indent 4 }}
+  vllm.json: |
+{{ .Files.Get "files/dashboards/vllm.json" | indent 4 }}
+  litellm.json: |
+{{ .Files.Get "files/dashboards/litellm.json" | indent 4 }}
+---
+{{ .Files.Get "files/dashboards/hami-native-dashboard.yaml" }}

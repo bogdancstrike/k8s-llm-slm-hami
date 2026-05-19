@@ -1,0 +1,35 @@
+---
+# KRO templates are deployed as a separate ArgoCD Application so they sync
+# BEFORE the workloads Application (which depends on InferenceEndpoint CRD
+# being registered by KRO from these RGDs).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kro-templates
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: qsint-ai-platform
+  source:
+    repoURL: https://github.com/bogdancstrike/qsint-ai-platform.git
+    targetRevision: main
+    path: kro-templates
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kro-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

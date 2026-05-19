@@ -1,0 +1,9 @@
+apiVersion: v2
+name: qsint-cert-manager
+description: Wrapper for cert-manager with CRDs enabled.
+type: application
+version: 0.1.0
+dependencies:
+  - name: cert-manager
+    version: v1.14.4
+    repository: https://charts.jetstack.io

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: qsint-kserve-crd
+description: Wrapper for KServe CRDs.
+type: application
+version: 0.1.0
+dependencies:
+  - name: kserve-crd
+    version: v0.13.0
+    repository: oci://ghcr.io/kserve/charts

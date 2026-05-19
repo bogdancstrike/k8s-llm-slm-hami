@@ -1,0 +1,42 @@
+---
+# KRO is installed by referencing the upstream Helm chart.
+# KRO project: https://kro.run
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kro
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: qsint-ai-platform
+  source:
+    repoURL: oci://ghcr.io/kro-run/kro
+    chart: kro
+    targetRevision: 0.4.0
+    helm:
+      releaseName: kro
+      valuesObject:
+        # Single replica is fine for PoC
+        replicas: 1
+        # Resource limits for the controller — KRO is lightweight
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        # Enable verbose logging during PoC for easier debugging
+        logLevel: debug
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kro-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

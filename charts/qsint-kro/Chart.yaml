@@ -1,0 +1,9 @@
+apiVersion: v2
+name: qsint-kro
+description: Wrapper for KRO.
+type: application
+version: 0.1.0
+dependencies:
+  - name: kro
+    version: 0.4.0
+    repository: oci://ghcr.io/kro-run/kro

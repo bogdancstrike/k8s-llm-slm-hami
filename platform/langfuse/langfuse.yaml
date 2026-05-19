@@ -1,0 +1,112 @@
+---
+# Langfuse — LLM tracing and analytics.
+#
+# Architecture:
+# - Connects to shared PostgreSQL on database 'langfuse'
+# - Receives traces from LiteLLM via callback (LANGFUSE_PUBLIC_KEY)
+# - UI on port 3000, exposed by ingress at http://langfuse.local.ro
+#
+# After deployment, log into Langfuse UI, create a project, copy the public+secret
+# keys, and paste them into the litellm-secrets Secret (kubectl edit secret litellm-secrets)
+# then restart LiteLLM pod.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-secrets
+  namespace: ai-platform
+type: Opaque
+stringData:
+  # NEXTAUTH_SECRET must be at least 32 chars
+  NEXTAUTH_SECRET: "langfuse-nextauth-secret-change-me-32"
+  # Encryption key for sensitive data at rest in DB (64 hex chars = 32 bytes)
+  ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  # Salt for hashing API keys
+  SALT: "langfuse-salt-change-me-please"
+  # DB connection — note the langfuse database
+  DATABASE_URL: "postgresql://platform:ChangeMe-PoC-Only-2026@postgres.ai-platform.svc.cluster.local:5432/langfuse"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse
+  template:
+    metadata:
+      labels:
+        app: langfuse
+    spec:
+      # Wait for postgres
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres.ai-platform.svc.cluster.local -U platform; do
+                echo "Waiting for postgres..."
+                sleep 3
+              done
+      containers:
+        - name: langfuse
+          image: langfuse/langfuse:2.93.0
+          ports:
+            - containerPort: 3000
+              name: http
+          envFrom:
+            - secretRef:
+                name: langfuse-secrets
+          env:
+            - name: NEXTAUTH_URL
+              value: "http://langfuse.local.ro"
+            - name: TELEMETRY_ENABLED
+              value: "false"
+            - name: LANGFUSE_DEFAULT_PROJECT_ID
+              value: "qsint-ai-platform"
+            - name: LANGFUSE_DEFAULT_PROJECT_ROLE
+              value: "ADMIN"
+            # Allow self-signup during PoC
+            - name: AUTH_DISABLE_SIGNUP
+              value: "false"
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse
+  namespace: ai-platform
+spec:
+  selector:
+    app: langfuse
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: ClusterIP

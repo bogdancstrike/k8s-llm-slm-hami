@@ -1,0 +1,126 @@
+# GitLab CE — slim values for single-node microk8s.
+# Resource budget: ~6GB RAM, ~50GB disk. No TLS, no registry, no runner.
+#
+# Access:
+#   external:  http://gitlab.local.ro    (add /etc/hosts entry → 127.0.0.1 or node IP)
+#   in-cluster: http://gitlab-webservice-default.gitlab.svc.cluster.local:8181
+
+global:
+  edition: ce
+  hosts:
+    domain: local.ro
+    https: false
+  ingress:
+    configureCertmanager: false
+    class: public
+    tls:
+      enabled: false
+  shell:
+    port: 22
+  initialRootPassword:
+    secret: gitlab-initial-root-password
+    key: password
+  appConfig:
+    enableUsagePing: false
+    object_store:
+      enabled: false
+    lfs:
+      enabled: false
+    artifacts:
+      enabled: false
+    uploads:
+      enabled: false
+    packages:
+      enabled: false
+    backups:
+      enabled: false
+
+# --- Disable bundled subcharts we don't need / already have ---
+certmanager:
+  install: false
+nginx-ingress:
+  enabled: false
+prometheus:
+  install: false
+gitlab-runner:
+  install: false
+registry:
+  enabled: false
+minio:
+  install: false
+gitlab-zoekt:
+  install: false
+
+# --- Core GitLab components ---
+gitlab:
+  webservice:
+    minReplicas: 1
+    maxReplicas: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1500Mi
+      limits:
+        memory: 3Gi
+  sidekiq:
+    minReplicas: 1
+    maxReplicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 800Mi
+      limits:
+        memory: 1500Mi
+  gitaly:
+    persistence:
+      size: 30Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 200Mi
+  gitlab-shell:
+    minReplicas: 1
+    maxReplicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi
+  toolbox:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 200Mi
+  kas:
+    enabled: false
+  mailroom:
+    enabled: false
+  gitlab-pages:
+    enabled: false
+  gitlab-exporter:
+    enabled: false
+  praefect:
+    enabled: false
+
+postgresql:
+  install: true
+  primary:
+    persistence:
+      size: 8Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  metrics:
+    enabled: false
+
+redis:
+  metrics:
+    enabled: false
+  master:
+    persistence:
+      size: 4Gi
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi

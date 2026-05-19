@@ -27,7 +27,10 @@ spec:
 
   quantization: "awq"
   maxModelLen: 1024
-  gpuMemUtilization: "0.65"
+  # 0.5B AWQ weights are tiny (~600 MiB), but the CUDA context + activations
+  # eat into the 5 GB slice. 0.85 gives KV cache enough budget to fit
+  # max_model_len=1024 (the engine bails out at 0.65 with KV cache=384 tokens).
+  gpuMemUtilization: "0.85"
 
   cpuRequest: "1"
   cpuLimit: "2"

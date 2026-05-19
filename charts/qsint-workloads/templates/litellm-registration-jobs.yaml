@@ -1,6 +1,6 @@
 {{- $models := list
   (dict "name" "gemma-1b" "alias" "gemma-1b-fast" "servedName" "gemma-1b" "backend" "vllm" "description" "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ via KServe + vLLM GPU")
-  (dict "name" "smollm3-3b" "alias" "smollm3-3b-quality" "servedName" "qwen25-1.5b-awq" "backend" "vllm" "description" "Qwen/Qwen2.5-1.5B-Instruct-AWQ via KServe + vLLM GPU")
+  (dict "name" "smollm3-3b" "alias" "smollm3-3b-quality" "servedName" "tinyllama-1.1b-chat-v03" "backend" "vllm" "description" "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ via KServe + vLLM GPU")
   (dict "name" "qwen25-3b-cpu" "alias" "qwen-3b-cpu" "servedName" "qwen25-3b-cpu" "backend" "llamacpp" "description" "Qwen2.5-3B-Instruct GGUF via KServe + llama.cpp CPU")
 }}
 {{- range $model := $models }}

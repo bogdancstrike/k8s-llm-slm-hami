@@ -1,5 +1,5 @@
 ---
-# TinyLlama 1.1B AWQ — second public GPU model exposed as the local "quality" slot.
+# Qwen2.5 0.5B AWQ — second public GPU model exposed as the local "quality" slot.
 #
 # vRAM budget:
 #   Weights (AWQ INT4):       ~1.8 GB
@@ -18,8 +18,8 @@ spec:
   # Backend selection — GPU inference via vLLM
   backend: vllm
 
-  model: "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ"
-  servedName: "tinyllama-1.1b-chat-v03"
+  model: "Qwen/Qwen2.5-0.5B-Instruct-AWQ"
+  servedName: "qwen25-0.5b-awq"
 
   gpuMemMb: 5000
   gpuMemPercentage: 30

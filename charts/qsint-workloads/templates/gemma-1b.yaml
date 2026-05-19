@@ -1,5 +1,5 @@
 ---
-# Gemma 3 1B Instruction-Tuned — small fast model.
+# TinyLlama 1.1B AWQ — small fast GPU model exposed as the local "gemma" slot.
 #
 # vRAM budget:
 #   Weights (AWQ INT4):       ~0.6 GB
@@ -8,12 +8,7 @@
 #   ─────────────────────────────────
 #   Total:                    ~2.6 GB  → fits in 5GB HAMi slice with headroom
 #
-# Gemma is a GATED model. Before this syncs, you MUST:
-#   1. Visit https://huggingface.co/google/gemma-3-1b-it and accept the license
-#   2. Create a HuggingFace token: https://huggingface.co/settings/tokens
-#   3. Set it as a secret:
-#      kubectl create secret generic huggingface-token -n inference \
-#        --from-literal=token=hf_YOUR_TOKEN_HERE
+# Public model: no Hugging Face token is required for the default PoC.
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
@@ -24,19 +19,17 @@ spec:
   backend: vllm
 
   # HuggingFace model ID
-  model: "google/gemma-3-1b-it"
+  model: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ"
 
   # Internal name used by vLLM's --served-model-name
   servedName: "gemma-1b"
 
   # GPU allocation via HAMi
   gpuMemMb: 5000
-  gpuMemPercentage: 35
+  gpuMemPercentage: 30
   gpuCorePercent: 35
 
   # Quantization — AWQ INT4 chosen for VRAM efficiency
-  # Note: Verify google/gemma-3-1b-it has an AWQ variant on HF Hub.
-  # If not, use a community quant like: TheBloke/gemma-3-1b-it-AWQ
   quantization: "awq"
   maxModelLen: 2048
   gpuMemUtilization: "0.85"

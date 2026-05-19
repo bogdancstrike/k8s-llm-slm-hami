@@ -1,5 +1,5 @@
 ---
-# SmolLM3-3B — HuggingFace TB's small but capable model.
+# Qwen2.5 1.5B AWQ — public GPU model exposed as the local "quality" slot.
 #
 # vRAM budget:
 #   Weights (AWQ INT4):       ~1.8 GB
@@ -18,15 +18,13 @@ spec:
   # Backend selection — GPU inference via vLLM
   backend: vllm
 
-  model: "HuggingFaceTB/SmolLM3-3B"
-  servedName: "smollm3-3b"
+  model: "Qwen/Qwen2.5-1.5B-Instruct-AWQ"
+  servedName: "qwen25-1.5b-awq"
 
   gpuMemMb: 5000
-  gpuMemPercentage: 45
+  gpuMemPercentage: 40
   gpuCorePercent: 45
 
-  # SmolLM3 has AWQ community quants. Verify availability or use base FP16
-  # (will fit weights but KV cache becomes tight — reduce maxModelLen to 1024).
   quantization: "awq"
   maxModelLen: 2048
   gpuMemUtilization: "0.80"

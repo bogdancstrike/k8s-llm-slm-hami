@@ -116,8 +116,6 @@ spec:
           annotations:
             serving.kserve.io/deploymentMode: "RawDeployment"
             serving.kserve.io/autoscalerClass: "hpa"
-            serving.kserve.io/metrics: "concurrency"
-            serving.kserve.io/target: "10"
             # Mark backend in annotations for observability (Grafana labels, etc.)
             qsint.ai-platform/backend: ${schema.spec.backend}
         spec:

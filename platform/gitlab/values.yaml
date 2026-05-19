@@ -72,6 +72,13 @@ gitlab:
       limits:
         memory: 1500Mi
   gitaly:
+    init:
+      containerSecurityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
     persistence:
       size: 30Gi
     resources:
@@ -79,6 +86,20 @@ gitlab:
         cpu: 100m
         memory: 200Mi
   gitlab-shell:
+    enabled: false
+    init:
+      containerSecurityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+    containerSecurityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
     minReplicas: 1
     maxReplicas: 1
     resources:
@@ -87,6 +108,13 @@ gitlab:
         memory: 100Mi
   toolbox:
     enabled: true
+    init:
+      containerSecurityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
     resources:
       requests:
         cpu: 50m

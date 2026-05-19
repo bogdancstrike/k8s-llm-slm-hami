@@ -85,9 +85,24 @@ spec:
             echo "Using cached model: $$(du -h $$MODEL_PATH)"
           fi
 
-          echo "Starting llama-server with $$THREADS threads, context $$CTX_SIZE"
+          LLAMA_SERVER="$$(command -v llama-server || true)"
+          if [ -z "$$LLAMA_SERVER" ]; then
+            for candidate in /app/llama-server /usr/local/bin/llama-server /bin/llama-server /llama-server; do
+              if [ -x "$$candidate" ]; then
+                LLAMA_SERVER="$$candidate"
+                break
+              fi
+            done
+          fi
+          if [ -z "$$LLAMA_SERVER" ]; then
+            echo "ERROR: llama-server binary not found"
+            find / -maxdepth 3 -name 'llama-server' 2>/dev/null || true
+            exit 1
+          fi
 
-          exec /llama-server \
+          echo "Starting $$LLAMA_SERVER with $$THREADS threads, context $$CTX_SIZE"
+
+          exec "$$LLAMA_SERVER" \
             --host 0.0.0.0 \
             --port 8080 \
             --model "$$MODEL_PATH" \

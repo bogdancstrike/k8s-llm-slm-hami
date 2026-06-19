@@ -29,7 +29,6 @@ htmlcov/
 
 # CI / dev configs
 .github/
-.gitlab-ci.yml
 .circleci/
 
 # Markdown / docs not needed inside the packaged chart

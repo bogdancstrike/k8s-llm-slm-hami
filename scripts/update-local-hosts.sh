@@ -2,15 +2,11 @@
 set -euo pipefail
 
 HOSTS=(
-  argocd.local.ro
-  gitlab.local.ro
   grafana.local.ro
   open-webui.local.ro
   langfuse.local.ro
   jaeger.local.ro
   litellm.local.ro
-  minio.local.ro
-  kas.local.ro
 )
 
 for host in "${HOSTS[@]}"; do

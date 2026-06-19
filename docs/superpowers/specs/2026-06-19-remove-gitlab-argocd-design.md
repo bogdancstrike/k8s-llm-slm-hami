@@ -5,7 +5,7 @@
 Remove the unused GitLab and Argo CD components from the repository and from
 the supported MicroK8s deployment workflow. The repository must no longer
 install, uninstall, configure, document, or otherwise reference either
-component outside this historical design record.
+component outside the historical design and implementation records.
 
 ## Scope
 
@@ -34,8 +34,7 @@ it does not claim an in-cluster GitOps or source-control service.
 
 ## Validation
 
-- A case-insensitive repository search, excluding `.git` and this design
-  record, returns no matches for the removed component names.
+- A case-insensitive repository search, excluding `.git` and the historical planning records, returns no matches for the removed component names.
 - All shell scripts pass `bash -n`.
 - Remaining first-party Helm charts pass `helm lint` using their checked-in
   dependencies.

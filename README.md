@@ -1,11 +1,11 @@
 # QSINT AI Platform — On-prem PoC
 
 > **Version:** 2.0  
-> **Last updated:** 2026-05-19  
+> **Last updated:** 2026-06-19
 > **Author:** Bogdan  
 > **Inspiration:** AWS re:Invent 2026 — "Building an Internal AI Platform with KRO" — adapted from EKS+Karpenter+ACK to a single-node MicroK8s box with one RTX 3080.
 
-A GitOps-driven, self-service AI platform that lets a developer push an
+A self-service AI platform that lets a developer apply an
 `InferenceEndpoint` YAML and have a model live, observable and chat-accessible
 in minutes — on hardware most people already have on their desk.
 
@@ -14,12 +14,10 @@ in minutes — on hardware most people already have on their desk.
 | Target cluster | MicroK8s, single node, `gpu=on` label |
 | GPU | NVIDIA RTX 3080 10 GB, vGPU partitioned by HAMi |
 | Install model | Helm charts in `charts/`, applied by `scripts/deploy-microk8s.sh` |
-| Sync (post-bootstrap) | Argo CD |
 | Inference runtimes | KServe `ClusterServingRuntime` — vLLM (GPU) + llama.cpp (CPU) |
 | Model abstraction | KRO `InferenceEndpoint` CRD (one YAML per model) |
 | Gateway | LiteLLM (OpenAI-compatible) |
 | Chat UI | Open WebUI |
-| Source control | Self-hosted GitLab CE |
 | Observability | kube-prometheus-stack, Grafana, OTel Collector, Jaeger, Langfuse |
 
 ---
@@ -56,14 +54,12 @@ in minutes — on hardware most people already have on their desk.
 ### What the PoC does
 
 Reproduce the AWS slide deck developer experience on a single consumer GPU:
-a developer commits `charts/qsint-workloads/templates/new-model.yaml`, Argo CD
-syncs, KRO expands the abstraction into KServe + a registration Job, and within
+a developer applies `charts/qsint-workloads/templates/new-model.yaml` with Helm,
+KRO expands the abstraction into KServe + a registration Job, and within
 minutes the model is:
 
 ```text
-git push                                  ← developer action
-   ↓
-Argo CD detects change                    ← GitOps sync
+helm upgrade applies InferenceEndpoint YAML  ← developer action
    ↓
 KRO expands the InferenceEndpoint CR      ← abstraction layer
    ↓
@@ -101,7 +97,7 @@ Three reasons, in order of importance:
    L40S/H200 hardware later. Better to be wrong now, on hardware that costs
    nothing per hour, than during the migration.
 3. **Self-service developer experience.** Once the platform is up, the team
-   adds models with a git commit — they never touch infrastructure. This is
+   adds models with a Helm upgrade — they never touch infrastructure. This is
    what scales the team.
 
 ---
@@ -185,18 +181,11 @@ Single pod, in-memory storage. Easy to demo; traces vanish on restart. In prod
 this becomes Jaeger Production with the existing QSINT Elasticsearch backend,
 or a migration to Grafana Tempo.
 
-### 3.8 Helm + a single bootstrap script, with Argo CD on top
+### 3.8 Helm + a single bootstrap script
 
-The PoC is installed by `scripts/deploy-microk8s.sh` (a chain of `helm
-upgrade --install`). Argo CD is installed in the same chain and afterwards
-takes ownership of further sync (commit-driven changes to `charts/`). The
-bootstrap script is deliberately idempotent — re-running it is the upgrade
-path.
-
-**Why not pure Argo App-of-Apps from the start?** The bootstrap problem (who
-installs Argo CD before Argo CD can install itself) is unpleasant; a script
-sidesteps it on day one. Once stable, you can flip the cluster to fully
-Argo-managed.
+The PoC is installed by `scripts/deploy-microk8s.sh`, a deliberate chain of
+`helm upgrade --install` commands. The script is idempotent: re-running it is
+the supported upgrade and reconciliation path for every bundled chart.
 
 ---
 
@@ -207,15 +196,11 @@ Argo-managed.
 ```mermaid
 flowchart LR
   subgraph dev["Developer plane"]
-    GitPush["git push<br/>InferenceEndpoint.yaml"]
+    HelmApply["helm upgrade<br/>InferenceEndpoint.yaml"]
   end
 
   subgraph cluster["MicroK8s node (gpu=on)"]
     direction LR
-
-    subgraph gitops["GitOps plane"]
-      Argo["Argo CD"]
-    end
 
     subgraph control["Control plane"]
       KRO["KRO controller<br/>(RGD: inference-endpoint)"]
@@ -240,11 +225,9 @@ flowchart LR
     LF["Langfuse"]
     JG["Jaeger + OTel collector"]
     Prom["Prometheus + Grafana"]
-    GitLab["GitLab CE"]
   end
 
-  GitPush --> GitLab
-  GitLab --> Argo --> KRO
+  HelmApply --> KRO
   KRO --> KServe
   KServe --> VLLM --> M1
   VLLM --> M2
@@ -267,9 +250,7 @@ flowchart LR
 
 | Namespace | What lives here |
 |---|---|
-| `argocd` | Argo CD itself and its Applications |
 | `cert-manager` | cert-manager controller + CRDs |
-| `gitlab` | Self-hosted GitLab CE (webservice, sidekiq, gitaly, registry, MinIO, KAS, …) |
 | `kserve` | KServe controller, webhooks, CRDs |
 | `kro-system` | KRO controller + RGDs |
 | `kube-system` | HAMi scheduler + device plugin DaemonSet |
@@ -450,28 +431,7 @@ Job: gemma-1b-litellm-register
 
 ## 6. Components in detail
 
-### 6.1 Argo CD — GitOps engine
-
-**Role.** Watch GitLab, reconcile cluster state against manifest state.
-Post-bootstrap, every change to `charts/` is picked up automatically.
-
-**Why this engine.** Best-in-class drift detection, mature UI, native
-multi-application/multi-cluster, sync waves and resource hooks come free.
-Flux is fine too — Argo wins on UI ergonomics and the maturity of its
-ApplicationSet.
-
-**Topology.** Applications wrap chart subtrees:
-
-| Application | Source path | Sync wave |
-|---|---|---|
-| `qsint-platform` | `charts/qsint-platform` | 0 |
-| `qsint-kro-templates` | `charts/qsint-kro-templates` | 0 |
-| `qsint-workloads` | `charts/qsint-workloads` | 1 (waits on the CRD) |
-
-Sync waves guarantee the InferenceEndpoint CRD exists before any
-InferenceEndpoint CR is applied.
-
-### 6.2 KRO — Kube Resource Orchestrator
+### 6.1 KRO — Kube Resource Orchestrator
 
 **Role.** Define high-level CRDs (`InferenceEndpoint`) that expand into one
 or more low-level Kubernetes objects (`InferenceService` + `Job`).
@@ -492,7 +452,7 @@ The repo ships exactly one RGD: `inference-endpoint` (see
 multi-backend: `spec.backend: vllm` selects the GPU runtime, `spec.backend:
 llamacpp` selects the CPU runtime.
 
-### 6.3 KServe — model serving abstraction
+### 6.2 KServe — model serving abstraction
 
 **Role.** Turn an `InferenceService` (one model) into a Deployment + Service
 + HPA, picking the right `ClusterServingRuntime` based on `modelFormat`.
@@ -506,7 +466,7 @@ llamacpp` selects the CPU runtime.
 **RawDeployment mode** (vs Knative-backed) — chosen because vLLM cold-starts
 in minutes; scale-to-zero is the wrong trade.
 
-### 6.4 HAMi — vGPU virtualisation
+### 6.3 HAMi — vGPU virtualisation
 
 **Role.** Software GPU virtualization. Multiple pods share one physical GPU
 with hard vRAM limits and soft compute caps.
@@ -533,7 +493,7 @@ isolation either. HAMi enforces limits inside the container with
 | `nvidia.com/gpumem` | MiB | **Hard** vRAM cap |
 | `nvidia.com/gpucores` | % | **Soft** compute share |
 
-### 6.5 vLLM `ClusterServingRuntime`
+### 6.4 vLLM `ClusterServingRuntime`
 
 Defined in `charts/qsint-platform/templates/13-vllm-servingruntime.yaml`.
 
@@ -560,7 +520,7 @@ Args parameterised per InferenceService:
 [--chat-template=/etc/vllm/chatml.jinja]   ← only when tokenizer lacks one
 ```
 
-### 6.6 llama.cpp `ClusterServingRuntime` (CPU)
+### 6.5 llama.cpp `ClusterServingRuntime` (CPU)
 
 Defined in `charts/qsint-platform/templates/14-llamacpp-servingruntime.yaml`.
 
@@ -575,7 +535,7 @@ Defined in `charts/qsint-platform/templates/14-llamacpp-servingruntime.yaml`.
 
 See [§19](#19-cpu-backend-with-llamacpp) for the full story.
 
-### 6.7 LiteLLM proxy
+### 6.6 LiteLLM proxy
 
 **Role.** Unified OpenAI-compatible gateway over any backend. Local vLLM,
 local llama.cpp, OpenAI, Anthropic, Bedrock, Azure — same surface.
@@ -591,7 +551,7 @@ local llama.cpp, OpenAI, Anthropic, Bedrock, Azure — same surface.
 unified callbacks (one OTel pipeline, one Langfuse hook), A/B testing by
 alias swap, and graceful fallback (GPU primary, CPU backup).
 
-### 6.8 Open WebUI
+### 6.7 Open WebUI
 
 **Role.** ChatGPT-like UI. Configured to talk to LiteLLM as its OpenAI
 backend. Auto-discovers models via `/v1/models` and shows them in the
@@ -604,7 +564,7 @@ OPENAI_API_KEY      = <litellm-master-key>
 
 The first user to sign up becomes admin.
 
-### 6.9 Langfuse
+### 6.8 Langfuse
 
 **Role.** LLM-specific observability. Unlike Jaeger (generic distributed
 tracing), Langfuse is specialised: prompt/completion logging, token counts,
@@ -614,13 +574,13 @@ cost attribution, evaluation runs, dataset management.
 
 **Wired up via** LiteLLM's `success_callback: [langfuse, otel]`.
 
-### 6.10 PostgreSQL (shared)
+### 6.9 PostgreSQL (shared)
 
 Single StatefulSet. Init script creates two logical databases (`litellm`,
 `langfuse`). Credentials in a K8s Secret. Sufficient for PoC; in prod, swap
 for CloudNativePG with replication and pgBackRest backups.
 
-### 6.11 OTel Collector + Jaeger
+### 6.10 OTel Collector + Jaeger
 
 **Collector.** Receives OTLP/gRPC on `:4317`, enriches with
 `k8sattributes`, batches, and forwards to Jaeger over OTLP. Also exposes
@@ -628,16 +588,6 @@ Prometheus metrics for self-monitoring.
 
 **Jaeger.** All-in-one for the PoC (in-memory storage); production should
 swap to ES or Tempo.
-
-### 6.12 GitLab CE
-
-Source-of-truth for the PoC. Vendored chart in `charts/qsint-gitlab/`,
-trimmed to fit single-node MicroK8s (`charts/qsint-gitlab/qsint-values.yaml`
-disables registry, runners, LFS, artifacts to keep RAM ≈ 6 GB).
-
-Why local GitLab when GitHub exists? Because the slide deck's gold standard
-is *self-hosted*: code, secrets, build artifacts never leave the cluster.
-Argo CD points at `gitlab.local.ro` and the workflow becomes air-gap-able.
 
 ---
 
@@ -745,10 +695,6 @@ Maps every `*.local.ro` ingress to `127.0.0.1`.
 
 | UI / endpoint | URL | Username | Secret retrieval |
 |---|---|---|---|
-| Argo CD | http://argocd.local.ro | `admin` | see below |
-| GitLab | http://gitlab.local.ro | `root` | see below |
-| GitLab MinIO | http://minio.local.ro | from `gitlab-minio-secret` | see below |
-| GitLab KAS | http://kas.local.ro | n/a (agent server) | n/a |
 | Grafana | http://grafana.local.ro | `admin` | see below |
 | Open WebUI | http://open-webui.local.ro | first signup becomes admin | chosen at signup |
 | Langfuse | http://langfuse.local.ro | first signup becomes admin | chosen at signup |
@@ -756,18 +702,6 @@ Maps every `*.local.ro` ingress to `127.0.0.1`.
 | LiteLLM API | http://litellm.local.ro | Bearer auth | `LITELLM_MASTER_KEY` |
 
 ```bash
-# Argo CD admin password
-microk8s kubectl -n argocd get secret argocd-initial-admin-secret \
-  -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
-
-# GitLab root password
-microk8s kubectl -n gitlab get secret gitlab-initial-root-password \
-  -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
-
-# GitLab MinIO access key + secret
-microk8s kubectl -n gitlab get secret gitlab-minio-secret \
-  -o go-template='{{"accesskey="}}{{index .data "accesskey" | base64decode}}{{"\nsecretkey="}}{{index .data "secretkey" | base64decode}}{{"\n"}}'
-
 # Grafana admin password
 microk8s kubectl -n observability get secret kube-prom-stack-grafana \
   -o go-template='{{index .data "admin-password" | base64decode}}{{"\n"}}'
@@ -784,8 +718,6 @@ Notes:
 - LiteLLM is bearer-auth: `Authorization: Bearer <LITELLM_MASTER_KEY>`.
 - Default master key is `sk-litellm-master-change-me` — **rotate before any
   non-lab use.**
-- Jaeger and KAS have no human login. KAS is the GitLab Kubernetes agent
-  server, not a UI.
 
 ---
 
@@ -841,12 +773,10 @@ microk8s kubectl create secret generic huggingface-token \
    ```text
    cert-manager
    kube-prometheus-stack
-   Argo CD
    HAMi
    KRO
    KServe CRDs
    KServe
-   GitLab
    qsint-namespaces
    qsint-platform
    qsint-kro-templates
@@ -893,7 +823,7 @@ EOF
 $EDITOR charts/qsint-workloads/templates/litellm-registration-jobs.yaml
 # append a dict to $models
 
-# 3. Apply (manual today, Argo CD post-bootstrap)
+# 3. Apply the workload chart
 ./scripts/deploy-microk8s.sh
 # or just:
 microk8s helm3 upgrade --install qsint-workloads charts/qsint-workloads \
@@ -1147,13 +1077,11 @@ What changes when this leaves the lab.
 - [ ] Semantic versioning + rollback strategy.
 - [ ] In-house re-quantisation CI with calibration datasets.
 
-### GitOps
+### Delivery controls
 
 - [ ] Sealed Secrets / External Secrets for Git-tracked secrets.
 - [ ] Branch protection + required reviews on `master`.
 - [ ] Pre-commit hooks (`yamllint`, `kubeval`, `conftest` with OPA policies).
-- [ ] Separate Argo CD environments — dev → staging → prod.
-- [ ] `ApplicationSet` once the model count crosses ~10.
 
 ### Cost
 
@@ -1180,7 +1108,6 @@ What changes when this leaves the lab.
 | Storage | Local NFS | Ceph RBD / Longhorn |
 | Postgres | Single replica | CloudNativePG HA |
 | Jaeger | All-in-one | Production + Elasticsearch |
-| Argo CD | Bootstrap + manual sync | Auto-sync, `ApplicationSet` per `workloads/` dir |
 | Secrets | Hard-coded | External Secrets + Vault |
 | LiteLLM | 1 replica | HPA 2–5 replicas + Redis cache |
 
@@ -1443,12 +1370,10 @@ Compromises in the current PoC:
 │   ├── qsint-namespaces/            ai-platform, inference namespaces
 │   ├── qsint-cert-manager/          cert-manager wrapper
 │   ├── qsint-observability-stack/   kube-prometheus-stack wrapper
-│   ├── qsint-argocd/                Argo CD wrapper
 │   ├── qsint-hami/                  HAMi vGPU wrapper
 │   ├── qsint-kro/                   KRO controller wrapper
 │   ├── qsint-kserve-crd/            KServe CRDs
 │   ├── qsint-kserve/                KServe wrapper
-│   ├── qsint-gitlab/                Vendored GitLab CE chart + qsint-values.yaml
 │   ├── qsint-kro-templates/         The InferenceEndpoint RGD
 │   ├── qsint-platform/              ai-platform services (LiteLLM, Open WebUI,
 │   │                                 Langfuse, Jaeger, OTel, Postgres, runtimes,
@@ -1467,11 +1392,6 @@ Compromises in the current PoC:
 ## 21. Cheat-sheet
 
 ```bash
-# Argo CD
-argocd app list
-argocd app sync qsint-workloads
-argocd app diff qsint-platform
-
 # KRO
 microk8s kubectl get resourcegraphdefinitions
 microk8s kubectl get inferenceendpoints -A
@@ -1513,6 +1433,4 @@ curl -s http://litellm.local.ro/v1/models \
 - Langfuse — <https://langfuse.com/docs>
 - OpenTelemetry Collector — <https://opentelemetry.io/docs/collector/>
 - Jaeger — <https://www.jaegertracing.io/docs/>
-- Argo CD — <https://argo-cd.readthedocs.io>
-- GitLab Helm chart — <https://docs.gitlab.com/charts/>
 - Qwen2.5 GGUF — <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF>

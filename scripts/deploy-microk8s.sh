@@ -49,7 +49,7 @@ You will lose:
   - All Langfuse projects, users and API keys
   - All LiteLLM model registrations (re-created by registration Jobs)
   - All Jaeger traces (in-memory backend)
-  - Argo CD / GitLab / Grafana initial credentials (rotated on install)
+  - Grafana initial credentials (rotated on install)
   - The model-cache PVC (50 Gi of GGUF + HF weight downloads)
 
 Pre-existing releases NOT touched: gpu-operator, nvidia-device-plugin, loki, tempo.
@@ -154,12 +154,10 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
   uninstall_release qsint-kro-templates  kro-system  5m
   uninstall_release qsint-platform       ai-platform 10m
   uninstall_release qsint-namespaces     default     5m
-  uninstall_release gitlab               gitlab      15m
   uninstall_release kserve               kserve      10m
   uninstall_release kserve-crd           kserve      5m
   uninstall_release kro                  kro-system  5m
   uninstall_release hami                 kube-system 5m
-  uninstall_release argocd               argocd      5m
   uninstall_release kube-prom-stack      observability 10m
   uninstall_release cert-manager         cert-manager 5m
 
@@ -171,12 +169,10 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
   done
 
   log "deleting PoC namespaces (cascades remaining objects)"
-  $KUBECTL delete namespace argocd cert-manager gitlab ai-platform inference \
+  $KUBECTL delete namespace cert-manager ai-platform inference \
     kserve kro-system --ignore-not-found=true --wait=false || true
 
-  wait_namespace_deleted argocd       300
   wait_namespace_deleted cert-manager 300
-  wait_namespace_deleted gitlab       600
   wait_namespace_deleted ai-platform  300
   wait_namespace_deleted inference    300
   wait_namespace_deleted kserve       300
@@ -203,9 +199,6 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
     clusterissuers.cert-manager.io \
     issuers.cert-manager.io \
     orders.acme.cert-manager.io \
-    applications.argoproj.io \
-    applicationsets.argoproj.io \
-    appprojects.argoproj.io \
     --ignore-not-found=true --wait=false || true
 
   log "deleting orphaned cluster-scoped RBAC from any prior raw install"
@@ -226,9 +219,6 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
     cert-manager-controller-orders \
     cert-manager-edit cert-manager-view \
     cert-manager-webhook:subjectaccessreviews \
-    argocd-application-controller \
-    argocd-applicationset-controller \
-    argocd-server \
     --ignore-not-found=true || true
   $KUBECTL delete clusterrolebinding \
     cert-manager-cainjector \
@@ -241,9 +231,6 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
     cert-manager-controller-issuers \
     cert-manager-controller-orders \
     cert-manager-webhook:subjectaccessreviews \
-    argocd-application-controller \
-    argocd-applicationset-controller \
-    argocd-server \
     --ignore-not-found=true || true
   $KUBECTL delete role -n kube-system \
     cert-manager-cainjector:leaderelection \
@@ -272,13 +259,12 @@ log "adding helm repos"
 $HELM repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
 $HELM repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 $HELM repo add hami-charts https://project-hami.github.io/HAMi/ >/dev/null 2>&1 || true
-$HELM repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
 $HELM repo update >/dev/null
 
 log "labeling GPU node ($GPU_NODE) with gpu=on"
 $KUBECTL label node "$GPU_NODE" gpu=on --overwrite
 
-for chart in qsint-cert-manager qsint-observability-stack qsint-argocd \
+for chart in qsint-cert-manager qsint-observability-stack \
              qsint-hami qsint-kro qsint-kserve-crd qsint-kserve; do
   helm_dep_update "charts/$chart"
 done
@@ -290,10 +276,6 @@ $HELM upgrade --install cert-manager "$ROOT_DIR/charts/qsint-cert-manager" \
 log "installing kube-prometheus-stack (Prometheus + Grafana + Alertmanager)"
 $HELM upgrade --install kube-prom-stack "$ROOT_DIR/charts/qsint-observability-stack" \
   --namespace observability --create-namespace --wait --timeout 15m
-
-log "installing Argo CD"
-$HELM upgrade --install argocd "$ROOT_DIR/charts/qsint-argocd" \
-  --namespace argocd --create-namespace --wait --timeout 10m
 
 log "installing HAMi vGPU scheduler"
 $HELM upgrade --install hami "$ROOT_DIR/charts/qsint-hami" \
@@ -310,12 +292,6 @@ $HELM upgrade --install kserve-crd "$ROOT_DIR/charts/qsint-kserve-crd" \
 log "installing KServe controller"
 $HELM upgrade --install kserve "$ROOT_DIR/charts/qsint-kserve" \
   --namespace kserve --wait --timeout 10m
-
-log "installing GitLab CE (slim values)"
-$HELM upgrade --install gitlab "$ROOT_DIR/charts/qsint-gitlab" \
-  --namespace gitlab --create-namespace \
-  --values "$ROOT_DIR/charts/qsint-gitlab/qsint-values.yaml" \
-  --wait --timeout 30m
 
 log "installing QSINT namespaces (ai-platform, inference)"
 $HELM upgrade --install qsint-namespaces "$ROOT_DIR/charts/qsint-namespaces" \
@@ -361,10 +337,6 @@ cat <<'EOF'
     sudo ./scripts/update-local-hosts.sh
 
   Initial credentials:
-    Argo CD admin    : kubectl -n argocd get secret argocd-initial-admin-secret \
-                         -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
-    GitLab root      : kubectl -n gitlab get secret gitlab-initial-root-password \
-                         -o go-template='{{index .data "password" | base64decode}}{{"\n"}}'
     Grafana admin    : kubectl -n observability get secret kube-prom-stack-grafana \
                          -o go-template='{{index .data "admin-password" | base64decode}}{{"\n"}}'
     LiteLLM bearer   : kubectl -n ai-platform get secret litellm-secrets \

@@ -1,6 +1,10 @@
 apiVersion: v2
 name: open-webui
-description: Open WebUI chat interface (LiteLLM OpenAI backend).
+description: Open WebUI chat interface (upstream chart vendored offline), wired to LiteLLM.
 type: application
 version: 0.1.0
-appVersion: "0.1.0"
+appVersion: "0.9.6"
+dependencies:
+  - name: open-webui
+    version: 14.8.0
+    repository: https://helm.openwebui.com

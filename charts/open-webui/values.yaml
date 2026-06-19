@@ -1,1 +1,69 @@
-{}
+# Open WebUI — configuration for the vendored upstream chart (helm.openwebui.com).
+# Everything below is overridable; values are namespaced under the `open-webui`
+# subchart key. Upstream chart: open-webui 14.8.0 (appVersion 0.9.6).
+open-webui:
+  # Keep resource names stable (Deployment/Service "open-webui").
+  fullnameOverride: open-webui
+
+  replicaCount: 1
+
+  image:
+    repository: ghcr.io/open-webui/open-webui
+    tag: "v0.9.6"
+    pullPolicy: IfNotPresent
+
+  # We front all models through LiteLLM — disable the bundled Ollama + Pipelines.
+  ollama:
+    enabled: false
+  pipelines:
+    enabled: false
+  tika:
+    enabled: false
+
+  # Point Open WebUI's OpenAI backend at the LiteLLM gateway.
+  openaiBaseApiUrl: "http://litellm.ai-platform.svc.cluster.local:4000/v1"
+  # LiteLLM master key (PoC default — rotate for real use, or use an existing secret).
+  openaiApiKey: "sk-litellm-master-change-me"
+
+  # Extra environment for the container.
+  extraEnvVars:
+    - name: WEBUI_SECRET_KEY
+      value: "open-webui-session-secret-change-me-32"
+    - name: WEBUI_AUTH
+      value: "true"
+    - name: ENABLE_SIGNUP
+      value: "true"
+    - name: ENABLE_OLLAMA_API
+      value: "false"
+    - name: DEFAULT_USER_ROLE
+      value: "user"
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: true
+    class: public
+    host: open-webui.local.ro
+    annotations: {}
+    tls: false
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: microk8s-hostpath
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

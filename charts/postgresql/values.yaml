@@ -1,1 +1,45 @@
-{}
+# Shared PostgreSQL — configuration for the vendored upstream Bitnami chart.
+# Values are namespaced under the `postgresql` subchart key. Chart 18.7.6.
+#
+# Serves two databases on one instance: `litellm` (LiteLLM gateway) and
+# `open_webui` (Open WebUI — uses Postgres instead of its default SQLite to
+# avoid SQLite migration bugs). Langfuse runs its own bundled Postgres.
+postgresql:
+  fullnameOverride: postgresql
+
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    # Bitnami deprecated pinned free tags in 2025; `latest` still resolves.
+    # Override with a mirrored/pinned tag for reproducible installs.
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  auth:
+    username: platform
+    password: "ChangeMe-PoC-Only-2026"
+    database: litellm
+    postgresPassword: "ChangeMe-PoC-Superuser-2026"
+
+  primary:
+    # Create the second database (open_webui) on first init.
+    initdb:
+      scripts:
+        01-create-open-webui-db.sql: |
+          CREATE DATABASE open_webui OWNER platform;
+          GRANT ALL PRIVILEGES ON DATABASE open_webui TO platform;
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: microk8s-hostpath
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+
+  # No read replicas on a single-node PoC.
+  readReplicas:
+    replicaCount: 0

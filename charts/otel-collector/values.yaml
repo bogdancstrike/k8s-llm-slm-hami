@@ -1,1 +1,112 @@
-{}
+# OpenTelemetry Collector — configuration for the vendored upstream chart
+# (open-telemetry.github.io/opentelemetry-helm-charts). Values are namespaced
+# under the `opentelemetry-collector` subchart key. Upstream chart 0.158.2.
+opentelemetry-collector:
+  fullnameOverride: otel-collector
+  mode: deployment
+  replicaCount: 1
+
+  # contrib image — required for the k8sattributes + prometheus components.
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.158.2"
+    pullPolicy: IfNotPresent
+
+  command:
+    name: otelcol-contrib
+
+  # Adds the k8sattributes processor (enriches spans with pod/ns/node) AND the
+  # ClusterRole/Binding it needs. The preset prepends k8sattributes to every
+  # pipeline below automatically.
+  presets:
+    kubernetesAttributes:
+      enabled: true
+
+  # Scrape the collector's own metrics into Prometheus.
+  serviceMonitor:
+    enabled: true
+    extraLabels:
+      release: kube-prom-stack
+
+  # Expose the Prometheus exporter port (8889) in addition to the chart defaults.
+  ports:
+    prom-export:
+      enabled: true
+      containerPort: 8889
+      servicePort: 8889
+      protocol: TCP
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+            cors:
+              allowed_origins:
+                - "http://*"
+                - "https://*"
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: otel-collector-self
+              scrape_interval: 30s
+              static_configs:
+                - targets: ["localhost:8888"]
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 128
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+        send_batch_max_size: 1024
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: poc
+            action: upsert
+          - key: service.platform
+            value: qsint-ai-platform
+            action: upsert
+    exporters:
+      otlp/jaeger:
+        endpoint: jaeger-collector.ai-platform.svc.cluster.local:4317
+        tls:
+          insecure: true
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 1000
+        retry_on_failure:
+          enabled: true
+      debug:
+        verbosity: basic
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        send_timestamps: true
+        metric_expiration: 180m
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [otlp/jaeger, debug]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheus, debug]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888

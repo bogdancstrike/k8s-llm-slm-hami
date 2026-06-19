@@ -1,6 +1,10 @@
 apiVersion: v2
 name: postgresql
-description: Shared PostgreSQL instance backing LiteLLM and Langfuse.
+description: Shared PostgreSQL for LiteLLM + Open WebUI (upstream Bitnami chart vendored offline).
 type: application
 version: 0.1.0
-appVersion: "0.1.0"
+appVersion: "18.4.0"
+dependencies:
+  - name: postgresql
+    version: 18.7.6
+    repository: https://charts.bitnami.com/bitnami

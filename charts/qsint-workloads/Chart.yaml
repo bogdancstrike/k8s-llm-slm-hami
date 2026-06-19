@@ -1,6 +1,0 @@
-apiVersion: v2
-name: qsint-workloads
-description: Example GPU and CPU inference workloads for the QSINT AI platform.
-type: application
-version: 0.1.0
-appVersion: "0.1.0"

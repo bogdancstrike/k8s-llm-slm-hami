@@ -11,7 +11,7 @@ metadata:
   name: {{ $model.name }}-litellm-register
   namespace: inference
   labels:
-    app.kubernetes.io/name: qsint-workloads
+    app.kubernetes.io/name: ai-models
     app.kubernetes.io/component: litellm-registration
     qsint.ai-platform/model: {{ $model.name }}
 spec:
@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: qsint-workloads
+        app.kubernetes.io/name: ai-models
         app.kubernetes.io/component: litellm-registration
         qsint.ai-platform/model: {{ $model.name }}
     spec:

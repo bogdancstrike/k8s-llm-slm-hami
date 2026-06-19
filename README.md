@@ -54,7 +54,7 @@ in minutes — on hardware most people already have on their desk.
 ### What the PoC does
 
 Reproduce the AWS slide deck developer experience on a single consumer GPU:
-a developer applies `charts/qsint-workloads/templates/new-model.yaml` with Helm,
+a developer applies `charts/ai-models/templates/new-model.yaml` with Helm,
 KRO expands the abstraction into KServe + a registration Job, and within
 minutes the model is:
 
@@ -78,7 +78,10 @@ Model appears in Open WebUI               ← user access
 
 - **Production-grade hardening.** Master keys are hard-coded, single replica
   on critical services, plain-HTTP ingresses. See [§17](#17-production-hardening-checklist).
-- **Multi-GPU tensor-parallel inference.** Single-GPU only. For TP=4 on H200,
+- **Multi-GPU tensor-parallel inference.** Configurable per model via the
+  `gpuCards` field (maps to vLLM `--tensor-parallel-size` and requests that many
+  `nvidia.com/gpu` devices), but the reference node has a single GPU, so the
+  bundled examples ship with `gpuCards: 1`. For TP=4 on H200,
   see [§18](#18-path-to-production-with-l40s).
 - **Training / fine-tuning.** Serving only.
 
@@ -306,6 +309,7 @@ spec:
   backend: vllm
   model: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ"
   servedName: "gemma-1b"
+  gpuCards: 1              # tensor-parallel size; 2+ shards across GPUs
   gpuMemMb: 5000
   gpuMemPercentage: 30
   gpuCorePercent: 35
@@ -370,7 +374,7 @@ to allocate more.
 Some HF quants (notably `Qwen/Qwen2.5-0.5B-Instruct-AWQ`) ship without a
 `chat_template` in `tokenizer_config.json`. transformers ≥ 4.44 refuses to
 synthesize one. To keep the runtime generic, the startup script in
-`charts/qsint-platform/templates/13-vllm-servingruntime.yaml`:
+`charts/serving-runtimes/templates/vllm-runtime.yaml`:
 
 1. Probes the tokenizer with `AutoTokenizer.from_pretrained(MODEL_ID)`.
 2. Checks whether `tokenizer.chat_template` is truthy.
@@ -489,13 +493,13 @@ isolation either. HAMi enforces limits inside the container with
 
 | Resource | Unit | Meaning |
 |---|---|---|
-| `nvidia.com/gpu` | count | Number of vGPUs (1/pod, default) |
+| `nvidia.com/gpu` | count | Number of vGPUs per pod (default 1; set per model via `gpuCards` for tensor parallelism) |
 | `nvidia.com/gpumem` | MiB | **Hard** vRAM cap |
 | `nvidia.com/gpucores` | % | **Soft** compute share |
 
 ### 6.4 vLLM `ClusterServingRuntime`
 
-Defined in `charts/qsint-platform/templates/13-vllm-servingruntime.yaml`.
+Defined in `charts/serving-runtimes/templates/vllm-runtime.yaml`.
 
 | Field | Value |
 |---|---|
@@ -522,7 +526,7 @@ Args parameterised per InferenceService:
 
 ### 6.5 llama.cpp `ClusterServingRuntime` (CPU)
 
-Defined in `charts/qsint-platform/templates/14-llamacpp-servingruntime.yaml`.
+Defined in `charts/serving-runtimes/templates/llamacpp-runtime.yaml`.
 
 | Field | Value |
 |---|---|
@@ -615,7 +619,7 @@ swap to ES or Tempo.
 
 ### 7.3 Bundled Grafana dashboards
 
-Auto-imported via the Grafana sidecar from `charts/qsint-platform/files/dashboards/`
+Auto-imported via the Grafana sidecar from `charts/monitoring/files/dashboards/`
 and published to the `qsint-ai-platform-dashboards` /
 `hami-native-dashboard` ConfigMaps in the `observability` namespace.
 
@@ -778,9 +782,16 @@ microk8s kubectl create secret generic huggingface-token \
    KServe CRDs
    KServe
    qsint-namespaces
-   qsint-platform
+   postgresql
+   litellm
+   langfuse
+   otel-collector
+   jaeger
+   open-webui
+   serving-runtimes
+   monitoring
    qsint-kro-templates
-   qsint-workloads
+   ai-models
    ```
 
 Expect 15–30 minutes the first time, mostly spent pulling images and the
@@ -794,7 +805,7 @@ End-to-end walk-through for `Qwen2.5-7B-Instruct-AWQ`:
 
 ```bash
 # 1. Drop a new template
-cat > charts/qsint-workloads/templates/qwen25-7b.yaml <<'EOF'
+cat > charts/ai-models/templates/qwen25-7b.yaml <<'EOF'
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
@@ -804,6 +815,7 @@ spec:
   backend: vllm
   model: "Qwen/Qwen2.5-7B-Instruct-AWQ"
   servedName: "qwen25-7b"
+  gpuCards: 1             # bump to 2 on a multi-GPU node to fit a larger model
   gpuMemMb: 8000          # ~7B AWQ + KV ≈ 7 GB; tight on 10 GB
   gpuMemPercentage: 80
   gpuCorePercent: 80
@@ -820,13 +832,13 @@ spec:
 EOF
 
 # 2. Add it to the LiteLLM registration list
-$EDITOR charts/qsint-workloads/templates/litellm-registration-jobs.yaml
+$EDITOR charts/ai-models/templates/litellm-registration-jobs.yaml
 # append a dict to $models
 
 # 3. Apply the workload chart
 ./scripts/deploy-microk8s.sh
 # or just:
-microk8s helm3 upgrade --install qsint-workloads charts/qsint-workloads \
+microk8s helm3 upgrade --install ai-models charts/ai-models \
   -n inference
 
 # 4. Watch reconciliation
@@ -1024,7 +1036,7 @@ microk8s kubectl -n observability logs <grafana-pod> -c grafana-sc-dashboard
 ```
 
 Manual fallback: open Grafana → Dashboards → Import → paste the JSON from
-`charts/qsint-platform/files/dashboards/`.
+`charts/monitoring/files/dashboards/`.
 
 ### Open WebUI says "no models"
 
@@ -1375,10 +1387,15 @@ Compromises in the current PoC:
 │   ├── qsint-kserve-crd/            KServe CRDs
 │   ├── qsint-kserve/                KServe wrapper
 │   ├── qsint-kro-templates/         The InferenceEndpoint RGD
-│   ├── qsint-platform/              ai-platform services (LiteLLM, Open WebUI,
-│   │                                 Langfuse, Jaeger, OTel, Postgres, runtimes,
-│   │                                 ingresses, dashboards)
-│   └── qsint-workloads/             Example InferenceEndpoints + register Jobs
+│   ├── postgresql/                  Shared LiteLLM + Langfuse database
+│   ├── litellm/                     LiteLLM gateway + ingress + secret mirror
+│   ├── langfuse/                    Langfuse tracing UI + ingress
+│   ├── open-webui/                  Open WebUI chat interface + ingress
+│   ├── jaeger/                      Jaeger tracing backend + UI + ingress
+│   ├── otel-collector/              OpenTelemetry Collector
+│   ├── serving-runtimes/            vLLM + llama.cpp ClusterServingRuntimes
+│   ├── monitoring/                  Grafana dashboards + HAMi ServiceMonitors
+│   └── ai-models/                   Example InferenceEndpoints + register Jobs
 ├── scripts/
 │   ├── deploy-microk8s.sh           One-shot installer / upgrader
 │   └── update-local-hosts.sh        Maps *.local.ro hostnames to 127.0.0.1
@@ -1411,7 +1428,7 @@ microk8s kubectl -n inference annotate inferenceendpoint <name> \
 
 # Re-run a registration Job
 microk8s kubectl -n inference delete job <model>-litellm-register
-microk8s helm3 upgrade --install qsint-workloads charts/qsint-workloads \
+microk8s helm3 upgrade --install ai-models charts/ai-models \
   -n inference
 
 # Quick LiteLLM smoke

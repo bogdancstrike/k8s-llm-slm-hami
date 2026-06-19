@@ -4,11 +4,11 @@
 # mount the volume because they all land on the same node.
 # Sized for ~10 small AWQ models (~3GB each) + overhead.
 #
-# Why this PVC lives in qsint-workloads, NOT qsint-platform:
+# Why this PVC lives in the ai-models chart, NOT serving-runtimes:
 # microk8s-hostpath uses `volumeBindingMode: WaitForFirstConsumer`. The PVC
-# stays Pending until a pod requests it. If this PVC were in qsint-platform
-# (which installs before any workload pods exist), `helm upgrade --wait`
-# would block until its 15-min timeout. Keeping it in qsint-workloads
+# stays Pending until a pod requests it. If this PVC were installed before any
+# model pods exist (e.g. with the serving runtimes), `helm upgrade --wait`
+# would block until its 15-min timeout. Keeping it in the ai-models chart
 # means the PVC and the first vLLM/llama.cpp pod that consumes it land in
 # the same release — KServe schedules a pod, hostpath binds, helm returns.
 #

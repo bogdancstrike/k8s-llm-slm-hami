@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # deploy-microk8s.sh — fresh teardown + redeploy of the QSINT AI Platform PoC.
 #
-# Scope: only the PoC stack we own (charts/qsint-*). Leaves pre-existing,
+# Scope: only the PoC stack we own (the charts under charts/, one Helm release
+# per app). Leaves pre-existing,
 # unrelated releases in the cluster alone (e.g. nvidia-device-plugin,
 # gpu-operator, loki, tempo). Use `WIPE_EXTRA="loki tempo"` to also remove
 # specific extra releases by name.
@@ -114,6 +115,15 @@ uninstall_release() {
   fi
 }
 
+secret_val() {
+  # Decode a single key from a Secret. Prints the value, or "<unavailable>"
+  # if the secret/key is missing. Used only for the post-install summary.
+  local ns="$1" name="$2" key="$3" val
+  val=$($KUBECTL -n "$ns" get secret "$name" \
+          -o go-template="{{index .data \"$key\" | base64decode}}" 2>/dev/null) || true
+  [[ -n "$val" ]] && echo "$val" || echo "<unavailable>"
+}
+
 # ─── confirmation ──────────────────────────────────────────────────────────
 
 confirm "${1:-}"
@@ -150,9 +160,16 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
   done
 
   # Uninstall in REVERSE dependency order so consumers go before their CRDs.
-  uninstall_release qsint-workloads      inference   5m
+  uninstall_release ai-models            inference   5m
   uninstall_release qsint-kro-templates  kro-system  5m
-  uninstall_release qsint-platform       ai-platform 10m
+  uninstall_release serving-runtimes     inference   5m
+  uninstall_release monitoring           observability 5m
+  uninstall_release open-webui           ai-platform 5m
+  uninstall_release jaeger               ai-platform 5m
+  uninstall_release otel-collector       ai-platform 5m
+  uninstall_release litellm              ai-platform 5m
+  uninstall_release langfuse             ai-platform 5m
+  uninstall_release postgresql           ai-platform 10m
   uninstall_release qsint-namespaces     default     5m
   uninstall_release kserve               kserve      10m
   uninstall_release kserve-crd           kserve      5m
@@ -297,16 +314,45 @@ log "installing QSINT namespaces (ai-platform, inference)"
 $HELM upgrade --install qsint-namespaces "$ROOT_DIR/charts/qsint-namespaces" \
   --namespace default --wait --timeout 5m
 
+# ── Platform apps (each app is now its own chart) ───────────────────────────
+# Postgres first — LiteLLM and Langfuse block on it via init containers.
+log "installing PostgreSQL (shared LiteLLM + Langfuse DB)"
+$HELM upgrade --install postgresql "$ROOT_DIR/charts/postgresql" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing LiteLLM (OpenAI-compatible gateway)"
+$HELM upgrade --install litellm "$ROOT_DIR/charts/litellm" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing Langfuse (LLM tracing UI)"
+$HELM upgrade --install langfuse "$ROOT_DIR/charts/langfuse" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing OpenTelemetry Collector"
+$HELM upgrade --install otel-collector "$ROOT_DIR/charts/otel-collector" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing Jaeger (tracing backend + UI)"
+$HELM upgrade --install jaeger "$ROOT_DIR/charts/jaeger" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing Open WebUI (chat interface)"
+$HELM upgrade --install open-webui "$ROOT_DIR/charts/open-webui" \
+  --namespace ai-platform --wait --timeout 10m
+
+log "installing KServe serving runtimes (vLLM GPU + llama.cpp CPU)"
+$HELM upgrade --install serving-runtimes "$ROOT_DIR/charts/serving-runtimes" \
+  --namespace inference --wait --timeout 10m
+
 if [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
-  log "creating huggingface-token secret in 'inference' from \$HUGGINGFACE_TOKEN"
-  $KUBECTL create secret generic huggingface-token -n inference \
-    --from-literal=token="$HUGGINGFACE_TOKEN" --dry-run=client -o yaml \
-    | $KUBECTL apply -f -
+  log "patching huggingface-token secret in 'inference' from \$HUGGINGFACE_TOKEN"
+  $KUBECTL -n inference patch secret huggingface-token --type merge \
+    -p "{\"stringData\":{\"token\":\"$HUGGINGFACE_TOKEN\"}}"
 fi
 
-log "installing QSINT platform (LiteLLM, Open WebUI, Langfuse, Postgres, OTel, Jaeger, runtimes)"
-$HELM upgrade --install qsint-platform "$ROOT_DIR/charts/qsint-platform" \
-  --namespace ai-platform --wait --timeout 15m
+log "installing monitoring (Grafana dashboards + HAMi ServiceMonitors)"
+$HELM upgrade --install monitoring "$ROOT_DIR/charts/monitoring" \
+  --namespace observability --wait --timeout 10m
 
 log "installing KRO templates (InferenceEndpoint RGD)"
 $HELM upgrade --install qsint-kro-templates "$ROOT_DIR/charts/qsint-kro-templates" \
@@ -315,8 +361,8 @@ $HELM upgrade --install qsint-kro-templates "$ROOT_DIR/charts/qsint-kro-template
 log "waiting for InferenceEndpoint CRD to be Established"
 $KUBECTL wait --for=condition=Established crd/inferenceendpoints.kro.run --timeout=180s
 
-log "installing example workloads (3 InferenceEndpoints + LiteLLM register jobs)"
-$HELM upgrade --install qsint-workloads "$ROOT_DIR/charts/qsint-workloads" \
+log "installing example models (3 InferenceEndpoints + LiteLLM register jobs)"
+$HELM upgrade --install ai-models "$ROOT_DIR/charts/ai-models" \
   --namespace inference --wait --timeout 10m
 
 # ─── post-install ──────────────────────────────────────────────────────────
@@ -328,23 +374,43 @@ $KUBECTL get ingress -A
 log "all model pods:"
 $KUBECTL -n inference get pods -l serving.kserve.io/inferenceservice -o wide || true
 
-cat <<'EOF'
+# ─── deploy summary ──────────────────────────────────────────────────────────
+# Live credentials pulled from the cluster so rotated/changed values are correct.
+
+GRAFANA_PW=$(secret_val observability kube-prom-stack-grafana admin-password)
+LITELLM_KEY=$(secret_val ai-platform litellm-secrets LITELLM_MASTER_KEY)
+
+cat <<EOF
 
 ==============================================================================
-  Deploy complete.
+  Deploy complete — QSINT AI Platform PoC
+
+  Components deployed (one Helm release per app):
+    cert-manager, kube-prometheus-stack (Prometheus/Grafana/Alertmanager),
+    HAMi vGPU scheduler, KRO, KServe (+CRDs), postgresql, litellm, langfuse,
+    otel-collector, jaeger, open-webui, serving-runtimes, monitoring,
+    KRO templates, and ai-models (3 example InferenceEndpoints).
 
   Map *.local.ro hostnames to 127.0.0.1 once on your workstation:
     sudo ./scripts/update-local-hosts.sh
 
-  Initial credentials:
-    Grafana admin    : kubectl -n observability get secret kube-prom-stack-grafana \
-                         -o go-template='{{index .data "admin-password" | base64decode}}{{"\n"}}'
-    LiteLLM bearer   : kubectl -n ai-platform get secret litellm-secrets \
-                         -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}{{"\n"}}'
+  ----------------------------------------------------------------------------
+  Service       Access URL                  Login
+  ----------------------------------------------------------------------------
+  Open WebUI    http://open-webui.local.ro  create admin on first visit (signup)
+  Langfuse      http://langfuse.local.ro    sign up on first visit; default
+                                            project: qsint-ai-platform
+  LiteLLM       http://litellm.local.ro/ui  user: admin
+                                            password: ${LITELLM_KEY}
+  Grafana       http://grafana.local.ro     user: admin
+                                            password: ${GRAFANA_PW}
+  Jaeger        http://jaeger.local.ro      no authentication
+  ----------------------------------------------------------------------------
+
+  API access:
+    LiteLLM bearer token : ${LITELLM_KEY}
 
   Smoke test:
-    LITELLM_KEY=$(microk8s kubectl -n ai-platform get secret litellm-secrets \
-                    -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}') \
-      python3 tests/e2e_smoke.py
+    LITELLM_KEY='${LITELLM_KEY}' python3 tests/e2e_smoke.py
 ==============================================================================
 EOF

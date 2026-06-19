@@ -25,6 +25,9 @@ spec:
   servedName: "gemma-1b"
 
   # GPU allocation via HAMi
+  # Number of GPU cards (vLLM tensor parallelism). 1 = single GPU.
+  # Set to 2+ on multi-GPU nodes to shard a larger model across cards.
+  gpuCards: 1
   gpuMemMb: 5000
   gpuMemPercentage: 30
   gpuCorePercent: 35

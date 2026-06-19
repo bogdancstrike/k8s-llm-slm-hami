@@ -68,6 +68,14 @@ spec:
       # HuggingFace model ID (e.g. "google/gemma-3-1b-it"). REQUIRED for vllm.
       model: string | default=""
 
+      # Number of GPU cards to spread this model across (vLLM tensor parallelism).
+      # 1 (default) = single GPU. N > 1 shards the model over N cards via
+      # vLLM --tensor-parallel-size=N. Requires N schedulable GPU devices
+      # (physical cards, or HAMi vGPU slices on multi-GPU nodes). The
+      # gpuMemPercentage / gpuCorePercent sizing below is applied per card.
+      # Ignored when backend=llamacpp (CPU only).
+      gpuCards: integer | default=1
+
       # HAMi vGPU sizing — only applied when backend=vllm.
       # gpuMemMb is retained for docs/backward compatibility; MicroK8s HAMi
       # v2.8 uses gpumem-percentage to avoid Kubernetes quantity coercion.
@@ -148,6 +156,9 @@ spec:
                   value: ${string(schema.spec.maxModelLen)}
                 - name: GPU_MEM_UTIL
                   value: ${schema.spec.gpuMemUtilization}
+                # vLLM tensor-parallel size — must match nvidia.com/gpu count below
+                - name: TENSOR_PARALLEL_SIZE
+                  value: ${string(schema.spec.gpuCards)}
                 # llama.cpp env vars
                 - name: MODEL_FILE
                   value: ${schema.spec.modelFile}
@@ -169,15 +180,16 @@ spec:
                 requests:
                   cpu: ${schema.spec.cpuRequest}
                   memory: ${schema.spec.memoryRequest}
-                  # Only request GPU when vLLM. CEL: backend == "vllm" ? "1" : "0"
+                  # Only request GPUs when vLLM, gpuCards of them (tensor parallelism).
+                  # CEL: backend == "vllm" ? "<gpuCards>" : "0"
                   # KServe/Kubernetes interpret resource value "0" as "don't request".
-                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? "1" : "0"}'
+                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCards) : "0"}'
                   nvidia.com/gpumem-percentage: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuMemPercentage) : "0"}'
                   nvidia.com/gpucores: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCorePercent) : "0"}'
                 limits:
                   cpu: ${schema.spec.cpuLimit}
                   memory: ${schema.spec.memoryLimit}
-                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? "1" : "0"}'
+                  nvidia.com/gpu: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCards) : "0"}'
                   nvidia.com/gpumem-percentage: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuMemPercentage) : "0"}'
                   nvidia.com/gpucores: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCorePercent) : "0"}'
 

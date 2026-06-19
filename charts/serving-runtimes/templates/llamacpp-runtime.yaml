@@ -1,0 +1,190 @@
+---
+# llama.cpp ClusterServingRuntime — CPU-only inference for GGUF models.
+#
+# Complementary to vllm-runtime. Choose runtime per InferenceEndpoint via
+# the `backend` field in the KRO Template (vllm | llamacpp).
+#
+# Critical design choices:
+#
+# 1. NO schedulerName: hami-scheduler
+#    CPU-only, no GPU resources requested. Default kube-scheduler places it
+#    on any node — intentional since CPU pods can land on non-GPU nodes
+#    (cheaper, more capacity).
+#
+# 2. Model download via wget on container start (not initContainer)
+#    KServe ServingRuntime doesn't standardize initContainers across versions.
+#    Inline download via shell wrapper is simpler and works on all KServe
+#    versions. Trade-off: cold-start ~30-60s for 2GB GGUF download.
+#    For prod: pre-bake GGUF files into the model-cache PVC (one-time setup).
+#
+# 3. Image: ghcr.io/ggerganov/llama.cpp:server-b4404
+#    Official, OpenAI-compatible, includes /v1/chat/completions, /v1/models,
+#    /v1/completions, /health endpoints. Pin tag for reproducibility.
+#
+# 4. Memory model: GGUF files mmap-loaded by llama.cpp.
+#    RAM usage = file_size + KV_cache + buffers.
+#    Qwen2.5-3B Q4_K_M (1.9GB) + ctx 2048 KV cache (~500MB) + buffers = ~3GB.
+#    Request 4GB, limit 8GB for headroom.
+#
+# 5. CPU threading: --threads should be PHYSICAL cores.
+#    Memory bandwidth is the bottleneck above ~8 threads on most CPUs.
+#    Set THREADS env per workload based on node CPU count.
+#
+# 6. ServerSentEvents / streaming support
+#    llama.cpp server supports streaming out of the box. LiteLLM detects this
+#    via the OpenAI-compatible API. No special config needed.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: llamacpp-runtime
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+
+  supportedModelFormats:
+    - name: gguf
+      version: "1"
+      autoSelect: true
+      priority: 1
+
+  protocolVersions:
+    - v2
+
+  # NO schedulerName here — default kube-scheduler runs on CPU nodes.
+
+  containers:
+    - name: kserve-container
+      image: ghcr.io/ggerganov/llama.cpp:server-b4404
+
+      # Wrap llama-server in shell that downloads GGUF if missing, then exec server.
+      # Using exec ensures llama-server becomes PID 1, getting signals correctly.
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - |
+          set -e
+
+          MODEL_PATH="/models/$${MODEL_FILE}"
+
+          # Download GGUF if not already cached on PVC
+          if [ ! -f "$$MODEL_PATH" ]; then
+            echo "Model file $$MODEL_PATH not found. Downloading..."
+            echo "Source: $$MODEL_URL"
+
+            # Install wget if missing (some llama.cpp images are minimal)
+            command -v wget >/dev/null 2>&1 || {
+              apt-get update -qq && apt-get install -y -qq wget ca-certificates
+            }
+
+            wget --progress=dot:giga -O "$$MODEL_PATH.tmp" "$$MODEL_URL"
+            mv "$$MODEL_PATH.tmp" "$$MODEL_PATH"
+            echo "Download complete: $$(du -h $$MODEL_PATH)"
+          else
+            echo "Using cached model: $$(du -h $$MODEL_PATH)"
+          fi
+
+          LLAMA_SERVER="$$(command -v llama-server || true)"
+          if [ -z "$$LLAMA_SERVER" ]; then
+            for candidate in /app/llama-server /usr/local/bin/llama-server /bin/llama-server /llama-server; do
+              if [ -x "$$candidate" ]; then
+                LLAMA_SERVER="$$candidate"
+                break
+              fi
+            done
+          fi
+          if [ -z "$$LLAMA_SERVER" ]; then
+            echo "ERROR: llama-server binary not found"
+            find / -maxdepth 3 -name 'llama-server' 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Starting $$LLAMA_SERVER with $$THREADS threads, context $$CTX_SIZE"
+
+          exec "$$LLAMA_SERVER" \
+            --host 0.0.0.0 \
+            --port 8080 \
+            --model "$$MODEL_PATH" \
+            --alias "$$SERVED_NAME" \
+            --ctx-size "$$CTX_SIZE" \
+            --threads "$$THREADS" \
+            --batch-size "$$BATCH_SIZE" \
+            --cont-batching \
+            --n-gpu-layers 0 \
+            --metrics
+
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+          name: http
+
+      env:
+        # Defaults — overridden per-InferenceService by KRO template
+        - name: MODEL_FILE
+          value: "qwen2.5-3b-instruct-q4_k_m.gguf"
+        - name: MODEL_URL
+          value: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+        - name: SERVED_NAME
+          value: "default"
+        - name: CTX_SIZE
+          value: "2048"
+        - name: THREADS
+          value: "6"
+        - name: BATCH_SIZE
+          value: "512"
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+
+      resources:
+        requests:
+          cpu: "4"
+          memory: 4Gi
+        limits:
+          cpu: "8"
+          memory: 8Gi
+        # NO GPU resources requested — pure CPU inference
+
+      volumeMounts:
+        - name: model-cache
+          mountPath: /models
+
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        # Allow longer initial delay because of model download on first run
+        initialDelaySeconds: 300
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        # Up to 10min for first-time GGUF download from HuggingFace on slow networks
+        failureThreshold: 60
+        timeoutSeconds: 5
+
+  volumes:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-cache-pvc

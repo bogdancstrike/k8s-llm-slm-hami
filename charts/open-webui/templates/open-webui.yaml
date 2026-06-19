@@ -1,0 +1,113 @@
+---
+# Open WebUI — chat interface pointing at LiteLLM as the OpenAI backend.
+#
+# Architecture:
+# - OPENAI_API_BASE_URL → LiteLLM proxy
+# - OPENAI_API_KEY → LiteLLM master key (or virtual key created in LiteLLM UI)
+# - Models appear in dropdown automatically (Open WebUI calls /v1/models on LiteLLM)
+#
+# Access: http://open-webui.local.ro via MicroK8s ingress
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: ai-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: microk8s-hostpath
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: open-webui-secrets
+  namespace: ai-platform
+type: Opaque
+stringData:
+  # Same as LITELLM_MASTER_KEY in litellm-secrets — Open WebUI authenticates as admin
+  OPENAI_API_KEY: "sk-litellm-master-change-me"
+  # Random secret for session encryption (32+ chars)
+  WEBUI_SECRET_KEY: "open-webui-session-secret-change-me-32"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:v0.3.30
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - secretRef:
+                name: open-webui-secrets
+          env:
+            # Point Open WebUI's OpenAI-compatible backend at LiteLLM
+            - name: OPENAI_API_BASE_URL
+              value: "http://litellm.ai-platform.svc.cluster.local:4000/v1"
+            # Disable Ollama backend (we use LiteLLM)
+            - name: ENABLE_OLLAMA_API
+              value: "false"
+            # Disable signup after first admin user is created
+            - name: ENABLE_SIGNUP
+              value: "true"
+            - name: DEFAULT_USER_ROLE
+              value: "user"
+            # Misc
+            - name: WEBUI_AUTH
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: open-webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: ai-platform
+spec:
+  selector:
+    app: open-webui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: postgresql
+description: Shared PostgreSQL instance backing LiteLLM and Langfuse.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qsint-ai-platform-dashboards
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: {{ .Values.grafana.folder | quote }}
+data:
+  # vLLM is scraped by the vllm-inference-pods PodMonitor; this dashboard
+  # populates as soon as either GPU model handles traffic.
+  vllm.json: |
+{{ .Files.Get "files/dashboards/vllm.json" | indent 4 }}
+  # NOTE: A QSINT HAMi dashboard was removed because the metric names it
+  # assumed (`hami_vgpu_memory_used_bytes`, etc.) don't exist; the upstream
+  # `HAMi GPU Split — Native Metrics` dashboard below already covers vRAM,
+  # core %, per-pod allocation, and host-level GPU stats using the real
+  # `vGPU_device_memory_*`, `HostCoreUtilization`, `vGPUMemoryAllocated`
+  # series that the HAMi scheduler + device plugin emit.
+  #
+  # NOTE: A QSINT LiteLLM dashboard was removed because LiteLLM's
+  # `prometheus` callback is Enterprise-only in v1.52.0-stable — enabling
+  # it makes the pod fail to start without a LITELLM_LICENSE. Gateway-
+  # level traces still flow through OTLP into Jaeger, and per-model
+  # numbers come from the vLLM / llama.cpp pods directly.
+  # KServe official dashboards
+  # Sources:
+  #   https://grafana.com/grafana/dashboards/17969 — ModelServer latency
+  #   https://grafana.com/grafana/dashboards/18026 — TorchServe latency
+  #   https://grafana.com/grafana/dashboards/18027 — Triton latency
+  #   https://grafana.com/grafana/dashboards/18032 — Knative-Serving HTTP
+  # See KServe docs:
+  #   https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/grafana-dashboards
+  #   https://kserve.github.io/website/docs/model-serving/predictive-inference/observability/prometheus-metrics
+  kserve-modelserver-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-modelserver-latency.json" | indent 4 }}
+  kserve-torchserve-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-torchserve-latency.json" | indent 4 }}
+  kserve-triton-latency.json: |
+{{ .Files.Get "files/dashboards/kserve-triton-latency.json" | indent 4 }}
+  knative-serving-http.json: |
+{{ .Files.Get "files/dashboards/knative-serving-http.json" | indent 4 }}
+---
+{{ .Files.Get "files/dashboards/hami-native-dashboard.yaml" }}

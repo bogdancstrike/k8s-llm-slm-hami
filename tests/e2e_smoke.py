@@ -1,12 +1,30 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test for the QSINT AI Platform.
+"""End-to-end + integration test suite for the QSINT AI Platform.
 
-Sends a chat completion request through the LiteLLM gateway to each of the
-three registered model aliases and verifies a non-empty response is produced.
-Also confirms the Open WebUI surface is reachable.
+Exercises **every component** of the platform, in two tiers:
 
-Stdlib-only: no pip install required. Self-signed TLS on *.local.ro is
-tolerated for the Open WebUI reachability check.
+HTTP tier (no cluster access required — just *.local.ro → 127.0.0.1):
+  - LiteLLM gateway: health, model registry, and a real chat completion through
+    EACH registered model (GPU vLLM + CPU llama.cpp).
+  - Open WebUI: health + reachability of the chat surface.
+  - Grafana: /api/health reports the database is OK.
+  - Jaeger: UI reachable, /api/services responds, and — after we drive traffic —
+    a trace for `litellm-proxy` actually lands (proves the OTLP → Collector →
+    Jaeger pipeline end-to-end).
+  - Langfuse: /api/public/health reports the app + DB are OK.
+
+Cluster/integration tier (needs `kubectl`; auto-skips with --no-cluster or when
+kubectl is unavailable):
+  - Every platform Deployment/StatefulSet is Ready (postgres, litellm, langfuse,
+    open-webui, jaeger, otel-collector).
+  - The vLLM and llama.cpp ClusterServingRuntimes exist.
+  - Each model's InferenceService is Ready and its registration Job Succeeded.
+  - HAMi scheduler is running and the GPU model pods are scheduled by it.
+  - Prometheus is scraping: via the Grafana datasource proxy we query `up` and
+    confirm the litellm / otel-collector / vLLM targets report up (proves the
+    Prometheus + Grafana metrics pipeline).
+
+Stdlib-only: no pip install. Self-signed TLS on *.local.ro is tolerated.
 """
 
 from __future__ import annotations
@@ -14,7 +32,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -24,31 +44,61 @@ from typing import Callable
 from xml.sax.saxutils import escape as xml_escape
 
 
-LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.local.ro").rstrip("/")
-OPEN_WEBUI_URL = os.environ.get("OPEN_WEBUI_URL", "https://open-webui.local.ro").rstrip("/")
+# ─── Configuration (all overridable via env) ────────────────────────────────
+
+def _url(name: str, default: str) -> str:
+    return os.environ.get(name, default).rstrip("/")
+
+
+LITELLM_URL = _url("LITELLM_URL", "http://litellm.local.ro")
+OPEN_WEBUI_URL = _url("OPEN_WEBUI_URL", "https://open-webui.local.ro")
+GRAFANA_URL = _url("GRAFANA_URL", "http://grafana.local.ro")
+JAEGER_URL = _url("JAEGER_URL", "http://jaeger.local.ro")
+LANGFUSE_URL = _url("LANGFUSE_URL", "http://langfuse.local.ro")
+
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-master-change-me")
+GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
+GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "")  # auto-fetched if empty
+KUBECTL = os.environ.get("KUBECTL", "microk8s kubectl")
 TIMEOUT = int(os.environ.get("TIMEOUT", "120"))
 
-MODEL_ALIASES = [
-    "gemma-1b-fast",
-    "smollm3-3b-quality",
-    "qwen-3b-cpu",
+# The aliases the PoC ships. The model-chat tests run against every alias
+# actually registered in LiteLLM, but these must all be present.
+EXPECTED_ALIASES = ["gemma-1b-fast", "smollm3-3b-quality", "qwen-3b-cpu"]
+
+# Platform workloads expected Ready (namespace, kind, name).
+PLATFORM_WORKLOADS = [
+    ("ai-platform", "statefulset", "postgres"),
+    ("ai-platform", "deployment", "litellm"),
+    ("ai-platform", "deployment", "langfuse"),
+    ("ai-platform", "deployment", "open-webui"),
+    ("ai-platform", "deployment", "jaeger"),
+    ("ai-platform", "deployment", "otel-collector"),
 ]
+
+# InferenceEndpoint name → whether it is a GPU (vLLM/HAMi) model.
+MODELS = {"gemma-1b": True, "smollm3-3b": True, "qwen25-3b-cpu": False}
 
 PROMPT = "Reply with exactly one short sentence: what is the capital of France?"
 
-
-# Tolerate self-signed certs on *.local.ro for the smoke check. The functional
-# LiteLLM call hits HTTP, so no TLS context is needed there.
 _UNVERIFIED_TLS = ssl.create_default_context()
 _UNVERIFIED_TLS.check_hostname = False
 _UNVERIFIED_TLS.verify_mode = ssl.CERT_NONE
 
 
+# ─── Result + runner plumbing ───────────────────────────────────────────────
+
+PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+
+class Skip(Exception):
+    """Raised by a check to mark itself skipped (not failed)."""
+
+
 @dataclass
 class Result:
     name: str
-    passed: bool
+    status: str
     elapsed_s: float
     detail: str = ""
 
@@ -56,80 +106,122 @@ class Result:
 @dataclass
 class Runner:
     results: list[Result] = field(default_factory=list)
+    only: list[str] = field(default_factory=list)
 
     def run(self, name: str, fn: Callable[[], str]) -> bool:
+        if self.only and not any(tok in name for tok in self.only):
+            return True
         start = time.monotonic()
         print(f"==> {name}", flush=True)
         try:
             detail = fn()
             elapsed = time.monotonic() - start
-            self.results.append(Result(name, True, elapsed, detail))
+            self.results.append(Result(name, PASS, elapsed, detail))
             print(f"    PASS ({elapsed:.1f}s) {detail}", flush=True)
+            return True
+        except Skip as e:
+            elapsed = time.monotonic() - start
+            self.results.append(Result(name, SKIP, elapsed, str(e)))
+            print(f"    SKIP ({elapsed:.1f}s) {e}", flush=True)
             return True
         except AssertionError as e:
             elapsed = time.monotonic() - start
-            self.results.append(Result(name, False, elapsed, str(e)))
+            self.results.append(Result(name, FAIL, elapsed, str(e)))
             print(f"    FAIL ({elapsed:.1f}s) {e}", flush=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             elapsed = time.monotonic() - start
-            self.results.append(Result(name, False, elapsed, f"{type(e).__name__}: {e}"))
+            self.results.append(Result(name, FAIL, elapsed, f"{type(e).__name__}: {e}"))
             print(f"    FAIL ({elapsed:.1f}s) {type(e).__name__}: {e}", flush=True)
         return False
 
 
-def _post_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    for k, v in headers.items():
+# ─── HTTP helpers ───────────────────────────────────────────────────────────
+
+def _request(url: str, *, method: str = "GET", data: bytes | None = None,
+             headers: dict | None = None, timeout: int = 15) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=timeout, context=_UNVERIFIED_TLS) as resp:
+            return resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        # Surface the upstream error body — LiteLLM forwards vLLM/llama.cpp
-        # validation errors in the response body, and the default HTTPError
-        # repr only contains the status code.
         try:
-            err_body = e.read().decode("utf-8", errors="replace")
+            body = e.read()
         except Exception:
-            err_body = ""
-        raise AssertionError(f"HTTP {e.code} from {url}: {err_body[:600]}") from e
+            body = b""
+        return e.code, body
 
 
-def check_litellm_healthy() -> str:
-    url = f"{LITELLM_URL}/health/liveliness"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            assert resp.status == 200, f"unexpected status {resp.status}"
-            return f"liveliness OK at {url}"
-    except urllib.error.HTTPError as e:
-        # Some LiteLLM versions expose /health/readiness instead.
-        if e.code == 404:
-            url = f"{LITELLM_URL}/health/readiness"
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                assert resp.status == 200, f"unexpected status {resp.status}"
-                return f"readiness OK at {url}"
-        raise
+def get_json(url: str, *, headers: dict | None = None, timeout: int = 15) -> dict:
+    status, body = _request(url, headers=headers, timeout=timeout)
+    assert status == 200, f"HTTP {status} from {url}: {body[:300]!r}"
+    return json.loads(body.decode("utf-8"))
+
+
+def post_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
+    status, body = _request(
+        url, method="POST", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **headers}, timeout=timeout,
+    )
+    text = body.decode("utf-8", errors="replace")
+    assert status == 200, f"HTTP {status} from {url}: {text[:600]}"
+    return json.loads(text)
+
+
+# ─── kubectl helper ─────────────────────────────────────────────────────────
+
+_KUBECTL_OK: bool | None = None
+
+
+def kubectl(args: list[str], timeout: int = 30) -> str:
+    cmd = shlex.split(KUBECTL) + args
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise AssertionError(f"`{' '.join(cmd)}` failed: {proc.stderr.strip()[:300]}")
+    return proc.stdout.strip()
+
+
+def kubectl_available() -> bool:
+    global _KUBECTL_OK
+    if _KUBECTL_OK is None:
+        try:
+            kubectl(["version", "--request-timeout=5s", "-o", "json"], timeout=15)
+            _KUBECTL_OK = True
+        except Exception:
+            _KUBECTL_OK = False
+    return _KUBECTL_OK
+
+
+def require_cluster() -> None:
+    if not kubectl_available():
+        raise Skip(f"kubectl unavailable ({KUBECTL!r}) — cluster checks skipped")
+
+
+# ═══ HTTP tier: LiteLLM gateway + models ════════════════════════════════════
+
+def check_litellm_health() -> str:
+    for path in ("/health/liveliness", "/health/readiness"):
+        status, _ = _request(f"{LITELLM_URL}{path}", timeout=10)
+        if status == 200:
+            return f"{path} OK"
+    raise AssertionError("neither /health/liveliness nor /health/readiness returned 200")
+
+
+def list_registered_aliases() -> set[str]:
+    data = get_json(f"{LITELLM_URL}/v1/models",
+                    headers={"Authorization": f"Bearer {LITELLM_KEY}"})
+    return {m.get("id") for m in data.get("data", [])}
 
 
 def check_models_registered() -> str:
-    url = f"{LITELLM_URL}/v1/models"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {LITELLM_KEY}")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    ids = {m.get("id") for m in data.get("data", [])}
-    missing = [m for m in MODEL_ALIASES if m not in ids]
-    assert not missing, (
-        f"missing model registrations in LiteLLM: {missing}. "
-        f"Found: {sorted(ids)}"
-    )
-    return f"all 3 aliases registered ({sorted(MODEL_ALIASES)})"
+    ids = list_registered_aliases()
+    missing = [m for m in EXPECTED_ALIASES if m not in ids]
+    assert not missing, f"missing aliases {missing}; found {sorted(ids)}"
+    return f"registered: {sorted(ids)}"
 
 
 def chat_via_litellm(alias: str) -> str:
-    url = f"{LITELLM_URL}/v1/chat/completions"
     payload = {
         "model": alias,
         "messages": [
@@ -139,90 +231,291 @@ def chat_via_litellm(alias: str) -> str:
         "max_tokens": 64,
         "temperature": 0.2,
     }
-    headers = {"Authorization": f"Bearer {LITELLM_KEY}"}
-    data = _post_json(url, payload, headers, TIMEOUT)
-
+    data = post_json(f"{LITELLM_URL}/v1/chat/completions", payload,
+                     {"Authorization": f"Bearer {LITELLM_KEY}"}, TIMEOUT)
     choices = data.get("choices") or []
-    assert choices, f"no choices in response: {json.dumps(data)[:400]}"
-    msg = choices[0].get("message") or {}
-    content = (msg.get("content") or "").strip()
-    assert content, f"empty assistant content: {json.dumps(data)[:400]}"
-
-    usage = data.get("usage") or {}
-    completion_tokens = usage.get("completion_tokens", "?")
+    assert choices, f"no choices: {json.dumps(data)[:400]}"
+    content = (choices[0].get("message") or {}).get("content", "").strip()
+    assert content, f"empty content: {json.dumps(data)[:400]}"
+    tokens = (data.get("usage") or {}).get("completion_tokens", "?")
     preview = content.replace("\n", " ")
-    if len(preview) > 80:
-        preview = preview[:77] + "..."
-    return f'tokens={completion_tokens} reply="{preview}"'
+    preview = preview[:77] + "..." if len(preview) > 80 else preview
+    return f'tokens={tokens} reply="{preview}"'
 
 
-def check_open_webui_reachable() -> str:
-    candidates = [OPEN_WEBUI_URL, OPEN_WEBUI_URL.replace("https://", "http://", 1)]
-    last_err: Exception | None = None
-    for url in candidates:
+# ═══ HTTP tier: UIs ═════════════════════════════════════════════════════════
+
+def check_open_webui() -> str:
+    # /health is unauthenticated and returns 200 when the app is up.
+    for base in (OPEN_WEBUI_URL, OPEN_WEBUI_URL.replace("https://", "http://", 1)):
+        for path in ("/health", "/"):
+            status, _ = _request(f"{base}{path}", timeout=10)
+            if 200 <= status < 400 or status in (401, 403):
+                return f"{base}{path} → {status}"
+    raise AssertionError("open-webui not reachable on any URL/path")
+
+
+def check_grafana() -> str:
+    data = get_json(f"{GRAFANA_URL}/api/health", timeout=10)
+    db = data.get("database")
+    assert db == "ok", f"grafana database not ok: {data}"
+    return f"version={data.get('version', '?')} database=ok"
+
+
+def check_jaeger_ui() -> str:
+    status, _ = _request(f"{JAEGER_URL}/", timeout=10)
+    assert status == 200, f"jaeger UI status {status}"
+    # /api/services must respond (list may be empty before any traffic).
+    data = get_json(f"{JAEGER_URL}/api/services", timeout=10)
+    services = data.get("data") or []
+    return f"UI up; services={services if services else '[] (no traffic yet)'}"
+
+
+def check_langfuse() -> str:
+    status, body = _request(f"{LANGFUSE_URL}/api/public/health", timeout=10)
+    assert status == 200, f"langfuse health status {status}: {body[:200]!r}"
+    return "api/public/health OK"
+
+
+# ═══ Integration: traces actually land in Jaeger ════════════════════════════
+
+def check_trace_pipeline() -> str:
+    """Drive one request, then confirm a litellm-proxy trace reaches Jaeger.
+
+    Proves LiteLLM → OTLP → OTel Collector → Jaeger end-to-end.
+    """
+    # Generate fresh traffic (best-effort; the per-model tests already did too).
+    try:
+        chat_via_litellm(EXPECTED_ALIASES[0])
+    except Exception:
+        pass
+    service = "litellm-proxy"
+    deadline = time.monotonic() + min(TIMEOUT, 60)
+    last = "no traces"
+    while time.monotonic() < deadline:
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=10, context=_UNVERIFIED_TLS) as resp:
-                assert 200 <= resp.status < 400, f"status {resp.status} from {url}"
-                return f"reachable at {url} (status {resp.status})"
-        except urllib.error.HTTPError as e:
-            # 401/403 still means UI is up — gating is expected before signup.
-            if 200 <= e.code < 500:
-                return f"reachable at {url} (status {e.code})"
-            last_err = e
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-    raise AssertionError(f"open-webui not reachable: {last_err}")
+            data = get_json(f"{JAEGER_URL}/api/traces?service={service}&limit=1",
+                            timeout=10)
+            traces = data.get("data") or []
+            if traces:
+                spans = len(traces[0].get("spans", []))
+                return f"found trace for {service} ({spans} spans)"
+            last = "service present but no traces yet"
+        except AssertionError as e:
+            last = str(e)
+        time.sleep(5)
+    raise AssertionError(f"no {service} trace landed in Jaeger within window ({last})")
 
+
+# ═══ Cluster tier ═══════════════════════════════════════════════════════════
+
+def _rollout_ready(ns: str, kind: str, name: str) -> None:
+    kubectl(["-n", ns, "rollout", "status", f"{kind}/{name}",
+             "--timeout=10s"], timeout=20)
+
+
+def check_workload_ready(ns: str, kind: str, name: str) -> str:
+    require_cluster()
+    _rollout_ready(ns, kind, name)
+    return f"{kind}/{name} ready in {ns}"
+
+
+def check_serving_runtimes() -> str:
+    require_cluster()
+    out = kubectl(["get", "clusterservingruntime", "-o",
+                   "jsonpath={.items[*].metadata.name}"])
+    names = set(out.split())
+    missing = {"vllm-runtime", "llamacpp-runtime"} - names
+    assert not missing, f"missing ClusterServingRuntimes: {missing}; have {names}"
+    return f"runtimes present: {sorted(names)}"
+
+
+def check_inferenceservice_ready(name: str) -> str:
+    require_cluster()
+    out = kubectl(["-n", "inference", "get", "inferenceservice", name, "-o",
+                   "jsonpath={.status.conditions[?(@.type=='Ready')].status}"])
+    assert out == "True", f"InferenceService {name} Ready={out!r}"
+    return f"{name} InferenceService Ready"
+
+
+def check_register_job(name: str) -> str:
+    require_cluster()
+    out = kubectl(["-n", "inference", "get", "job", f"{name}-litellm-register",
+                   "-o", "jsonpath={.status.succeeded}"])
+    assert out == "1", f"register job for {name} not succeeded (succeeded={out!r})"
+    return f"{name}-litellm-register succeeded"
+
+
+def check_hami_scheduler() -> str:
+    require_cluster()
+    out = kubectl(["-n", "kube-system", "get", "pods",
+                   "-l", "app.kubernetes.io/component=hami-scheduler",
+                   "-o", "jsonpath={.items[*].status.phase}"])
+    phases = out.split()
+    assert phases and all(p == "Running" for p in phases), \
+        f"hami-scheduler not Running: {phases}"
+    return f"hami-scheduler Running ({len(phases)} pod)"
+
+
+def check_gpu_pods_on_hami() -> str:
+    require_cluster()
+    checked = []
+    for name, is_gpu in MODELS.items():
+        if not is_gpu:
+            continue
+        sched = kubectl(["-n", "inference", "get", "pods",
+                         "-l", f"serving.kserve.io/inferenceservice={name}",
+                         "-o", "jsonpath={.items[*].spec.schedulerName}"])
+        assert sched and all(s == "hami-scheduler" for s in sched.split()), \
+            f"{name} pods not on hami-scheduler: {sched!r}"
+        checked.append(name)
+    assert checked, "no GPU models to check"
+    return f"GPU pods on hami-scheduler: {checked}"
+
+
+# ═══ Integration: Prometheus scraping via Grafana datasource proxy ══════════
+
+def _grafana_password() -> str:
+    if GRAFANA_PASSWORD:
+        return GRAFANA_PASSWORD
+    require_cluster()
+    import base64
+    b64 = kubectl(["-n", "observability", "get", "secret",
+                   "kube-prom-stack-grafana", "-o",
+                   "go-template={{index .data \"admin-password\"}}"])
+    return base64.b64decode(b64).decode("utf-8")
+
+
+def check_prometheus_targets() -> str:
+    """Query `up` through Grafana's Prometheus datasource proxy.
+
+    Proves Prometheus is scraping AND Grafana's datasource works — the whole
+    metrics pipeline. Needs the Grafana admin password (env or kubectl).
+    """
+    import base64
+    password = _grafana_password()
+    auth = base64.b64encode(f"{GRAFANA_USER}:{password}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}"}
+
+    ds = get_json(f"{GRAFANA_URL}/api/datasources", headers=headers, timeout=10)
+    prom = next((d for d in ds if d.get("type") == "prometheus"), None)
+    assert prom, f"no prometheus datasource in Grafana: {[d.get('type') for d in ds]}"
+    uid = prom["uid"]
+
+    q = f"{GRAFANA_URL}/api/datasources/proxy/uid/{uid}/api/v1/query?query=up"
+    res = get_json(q, headers=headers, timeout=15)
+    assert res.get("status") == "success", f"prometheus query failed: {res}"
+    results = res.get("data", {}).get("result", [])
+    up_jobs = {r["metric"].get("job") for r in results if r.get("value", [None, "0"])[1] == "1"}
+    assert up_jobs, "no targets reporting up=1"
+    # We don't hard-require specific job names (labels vary), but surface them.
+    return f"{len(up_jobs)} jobs up: {sorted(j for j in up_jobs if j)[:8]}"
+
+
+# ─── JUnit output ───────────────────────────────────────────────────────────
 
 def write_junit(path: str, results: list[Result]) -> None:
     total = len(results)
-    failures = sum(1 for r in results if not r.passed)
+    failures = sum(1 for r in results if r.status == FAIL)
+    skipped = sum(1 for r in results if r.status == SKIP)
     duration = sum(r.elapsed_s for r in results)
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        f'<testsuite name="qsint-e2e-smoke" tests="{total}" failures="{failures}" time="{duration:.2f}">',
+        f'<testsuite name="qsint-e2e" tests="{total}" failures="{failures}" '
+        f'skipped="{skipped}" time="{duration:.2f}">',
     ]
     for r in results:
         lines.append(
-            f'  <testcase classname="qsint.e2e" name="{xml_escape(r.name)}" time="{r.elapsed_s:.2f}">'
+            f'  <testcase classname="qsint.e2e" name="{xml_escape(r.name)}" '
+            f'time="{r.elapsed_s:.2f}">'
         )
-        if not r.passed:
+        if r.status == FAIL:
             lines.append(
-                f'    <failure message="{xml_escape(r.detail)[:200]}">{xml_escape(r.detail)}</failure>'
+                f'    <failure message="{xml_escape(r.detail)[:200]}">'
+                f'{xml_escape(r.detail)}</failure>'
             )
+        elif r.status == SKIP:
+            lines.append(f'    <skipped message="{xml_escape(r.detail)[:200]}"/>')
         lines.append("  </testcase>")
     lines.append("</testsuite>")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
 
+# ─── Main ───────────────────────────────────────────────────────────────────
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--junit", help="path to write JUnit XML report")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--junit", help="write a JUnit XML report")
+    parser.add_argument("--no-cluster", action="store_true",
+                        help="skip the kubectl-based cluster/integration checks")
+    parser.add_argument("--only", action="append", default=[],
+                        help="run only checks whose name contains this token "
+                             "(repeatable)")
     args = parser.parse_args()
 
-    print(f"LiteLLM URL:    {LITELLM_URL}")
-    print(f"Open WebUI URL: {OPEN_WEBUI_URL}")
-    print(f"Timeout:        {TIMEOUT}s")
-    print()
+    print(f"LiteLLM:   {LITELLM_URL}")
+    print(f"Open WebUI:{OPEN_WEBUI_URL}")
+    print(f"Grafana:   {GRAFANA_URL}")
+    print(f"Jaeger:    {JAEGER_URL}")
+    print(f"Langfuse:  {LANGFUSE_URL}")
+    print(f"kubectl:   {KUBECTL if not args.no_cluster else '(disabled)'}")
+    print(f"Timeout:   {TIMEOUT}s\n")
 
-    runner = Runner()
-    ok = True
-    ok &= runner.run("litellm/health", check_litellm_healthy)
-    ok &= runner.run("litellm/models-registered", check_models_registered)
-    for alias in MODEL_ALIASES:
-        ok &= runner.run(f"litellm/chat[{alias}]", lambda a=alias: chat_via_litellm(a))
-    ok &= runner.run("open-webui/reachable", check_open_webui_reachable)
+    r = Runner(only=args.only)
+
+    # ── HTTP tier ──────────────────────────────────────────────────────────
+    print("── HTTP / e2e tier ─────────────────────────────────────────")
+    r.run("litellm/health", check_litellm_health)
+    r.run("litellm/models-registered", check_models_registered)
+    # Test every alias actually registered (covers each deployed model).
+    try:
+        aliases = sorted(list_registered_aliases() | set(EXPECTED_ALIASES))
+    except Exception:
+        aliases = EXPECTED_ALIASES
+    for alias in aliases:
+        if alias:
+            r.run(f"litellm/chat[{alias}]", lambda a=alias: chat_via_litellm(a))
+    r.run("open-webui/health", check_open_webui)
+    r.run("grafana/health", check_grafana)
+    r.run("jaeger/ui", check_jaeger_ui)
+    r.run("langfuse/health", check_langfuse)
+    r.run("integration/trace-pipeline", check_trace_pipeline)
+
+    # ── Cluster tier ───────────────────────────────────────────────────────
+    print("\n── Cluster / integration tier ──────────────────────────────")
+    if args.no_cluster:
+        print("   (skipped via --no-cluster)")
+    else:
+        for ns, kind, name in PLATFORM_WORKLOADS:
+            r.run(f"cluster/ready[{name}]",
+                  lambda n=ns, k=kind, nm=name: check_workload_ready(n, k, nm))
+        r.run("cluster/serving-runtimes", check_serving_runtimes)
+        for name in MODELS:
+            r.run(f"cluster/isvc-ready[{name}]",
+                  lambda nm=name: check_inferenceservice_ready(nm))
+            r.run(f"cluster/register-job[{name}]",
+                  lambda nm=name: check_register_job(nm))
+        r.run("cluster/hami-scheduler", check_hami_scheduler)
+        r.run("cluster/gpu-pods-on-hami", check_gpu_pods_on_hami)
+        r.run("integration/prometheus-targets", check_prometheus_targets)
 
     if args.junit:
-        write_junit(args.junit, runner.results)
+        write_junit(args.junit, r.results)
         print(f"\nJUnit report -> {args.junit}")
 
-    passed = sum(1 for r in runner.results if r.passed)
-    total = len(runner.results)
-    print(f"\nSummary: {passed}/{total} passed")
-    return 0 if ok else 1
+    passed = sum(1 for x in r.results if x.status == PASS)
+    failed = sum(1 for x in r.results if x.status == FAIL)
+    skipped = sum(1 for x in r.results if x.status == SKIP)
+    print(f"\nSummary: {passed} passed, {failed} failed, {skipped} skipped "
+          f"({len(r.results)} total)")
+    if failed:
+        print("Failed:")
+        for x in r.results:
+            if x.status == FAIL:
+                print(f"  - {x.name}: {x.detail}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -80,7 +80,24 @@ Follow-up answer quality is **measured and reported** (a per-scenario `q_ok/q_to
 column plus per-question latency) but report-only by default — a 0.5B model
 legitimately flubs chained reasoning. Set `QUALITY_THRESHOLD>0` to enforce a bar.
 
-The models under test:
+Each run writes a single **`tests/report_<timestamp>.html`** (git-ignored) that
+**opens in your browser automatically** and is **fully offline** — no CDN, no
+network. The HTML embeds a full **MDX** document (in a `<script type="text/mdx">`
+tag) and the vendored [`@mdx-js/mdx`](https://mdxjs.com/packages/mdx/) render
+bundle (`tests/vendor/mdx-bundle.js` — `@mdx-js/mdx` + `remark-gfm` +
+`remark-frontmatter` + `preact`), so it renders the MDX in-browser with zero
+external requests — the one file *is* the renderable MDX. It contains the summary,
+per-conversation question→answer tables, and a collapsible block per turn with the
+**full answer** + a copy-paste **`curl`** that replays that exact turn (complete
+history). Export `LITELLM_KEY` and any curl re-fires the question and prints the
+answer. (If the vendored bundle is missing, the page falls back to the raw MDX
+source — see [`vendor/README.md`](vendor/README.md) to rebuild it.) Flags:
+`--no-open` (don't launch the browser, e.g. in CI), `--no-report`,
+`--report-dir <dir>`, `--no-trace-check`.
+
+The model list is **discovered dynamically** from LiteLLM's `/v1/models`, so any
+newly registered model is tested out of the box (the scenarios are model-agnostic).
+Pin a subset with `ALIASES="a,b"` if needed. At time of writing the platform ships:
 
 | Alias | Backend | Model |
 |---|---|---|

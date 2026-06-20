@@ -52,6 +52,9 @@ tmp/
 *.tmp
 *.bak
 
+# --- Test artifacts ---
+tests/report_*.html
+
 # --- Claude Code / agents scratch ---
 .claude/
 .superpowers/

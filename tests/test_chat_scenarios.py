@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import os
 import secrets
@@ -40,6 +41,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from typing import Callable
 from xml.sax.saxutils import escape as xml_escape
@@ -58,10 +60,10 @@ LANGFUSE_URL = _url("LANGFUSE_URL", "http://langfuse.local.ro")
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-master-change-me")
 TIMEOUT = int(os.environ.get("TIMEOUT", "120"))
 
-# Every model alias deployed on the platform.
-ALL_ALIASES = os.environ.get(
-    "ALIASES", "gemma-1b-fast,smollm3-3b-quality,qwen-3b-cpu"
-).split(",")
+# Model aliases under test — populated at runtime from LiteLLM's /v1/models
+# (see discover_aliases) so newly registered models are picked up out of the box.
+# Override with ALIASES="a,b" to pin a subset.
+ALL_ALIASES: list[str] = []
 
 # Langfuse API key pair (default PoC keys).
 LF_PUBLIC_KEY = os.environ.get(
@@ -176,6 +178,22 @@ def _litellm_headers() -> dict:
 def _langfuse_headers() -> dict:
     auth_str = f"{LF_PUBLIC_KEY}:{LF_SECRET_KEY}"
     return {"Authorization": f"Basic {base64.b64encode(auth_str.encode()).decode()}"}
+
+
+def discover_aliases() -> list[str]:
+    """Resolve the model aliases to test.
+
+    Dynamic by default: queries LiteLLM's `/v1/models` so any newly registered
+    model is exercised automatically (the scenarios are model-agnostic). Set the
+    ALIASES env var (comma-separated) to pin a specific subset instead.
+    """
+    override = os.environ.get("ALIASES", "").strip()
+    if override:
+        return [a.strip() for a in override.split(",") if a.strip()]
+    data = get_json(f"{LITELLM_URL}/v1/models", headers=_litellm_headers(), timeout=15)
+    ids = sorted(m["id"] for m in data.get("data", []) if m.get("id"))
+    assert ids, f"{LITELLM_URL}/v1/models returned no models"
+    return ids
 
 
 def _make_traceparent() -> tuple[str, str]:
@@ -307,6 +325,10 @@ class TurnMetric:
     latency_s: float
     quality_ok: bool
     anchor: bool
+    # Exact request that produced this turn (system + history + this user msg),
+    # so the report can emit a runnable curl that reproduces it.
+    request_messages: list = field(default_factory=list)
+    max_tokens: int = 0
 
 
 # Collected globally for the final timing/quality report.
@@ -339,7 +361,8 @@ def run_scenario(alias: str, scenario: Scenario, check_traces: bool) -> str:
         quality_ok = (not turn.expect_any) or any(
             kw.lower() in low for kw in turn.expect_any
         )
-        metrics.append(TurnMetric(i, turn.prompt, reply, latency, quality_ok, turn.anchor))
+        metrics.append(TurnMetric(i, turn.prompt, reply, latency, quality_ok,
+                                  turn.anchor, list(messages), turn.max_tokens))
 
         # Anchor turns must be answered correctly by every model.
         assert (not turn.anchor) or quality_ok, (
@@ -445,6 +468,225 @@ def _turn_has_keywords(scenario_name: str, turn_idx: int) -> bool:
     return False
 
 
+# ─── MDX document (embedded into the HTML report) ────────────────────────────
+
+def _md_cell(s: str, width: int = 64) -> str:
+    """Make a string safe for a Markdown/MDX table cell (one line, escaped)."""
+    s = " ".join(s.split())
+    if len(s) > width:
+        s = s[: width - 1] + "…"
+    # Escape table/MDX-significant chars. `{` and `<` would be parsed by MDX as
+    # JS/JSX outside code fences; the faithful answer lives in a fenced block below.
+    return (s.replace("\\", "")
+             .replace("|", "\\|")
+             .replace("`", "'")
+             .replace("{", "(").replace("}", ")")
+             .replace("<", "‹").replace(">", "›"))
+
+
+def _curl_for(alias: str, messages: list[dict], max_tokens: int) -> str:
+    """A copy-paste curl that reproduces one turn. Uses a quoted heredoc so the
+    JSON body needs no escaping; `$LITELLM_KEY` in the header still expands."""
+    payload = {
+        "model": alias,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    return (
+        f"curl -s {LITELLM_URL}/v1/chat/completions \\\n"
+        f'  -H "Authorization: Bearer $LITELLM_KEY" \\\n'
+        f'  -H "Content-Type: application/json" \\\n'
+        f"  -d @- <<'JSON' | jq -r '.choices[0].message.content'\n"
+        f"{body}\n"
+        f"JSON"
+    )
+
+
+def _code_block(content: str, lang: str = "") -> list[str]:
+    """Fenced code-block lines using a fence longer than any backtick run inside,
+    so code answers that themselves contain ``` don't terminate the fence early."""
+    longest = cur = 0
+    for ch in content:
+        cur = cur + 1 if ch == "`" else 0
+        longest = max(longest, cur)
+    fence = "`" * max(3, longest + 1)
+    return [f"{fence}{lang}", content, fence]
+
+
+def build_mdx_text(results: list[Result], when: str, check_traces: bool) -> str:
+    """Build the full MDX document — valid MDX: GFM tables + JSX <details> blocks,
+    fenced code with safe fence lengths. Rendered by the .html via @mdx-js/mdx."""
+    passed = sum(1 for x in results if x.status == PASS)
+    failed = sum(1 for x in results if x.status == FAIL)
+    skipped = sum(1 for x in results if x.status == SKIP)
+
+    out: list[str] = [
+        "---",
+        "title: AI Platform — Chat Scenario Report",
+        f"date: {when}",
+        f"litellm: {LITELLM_URL}",
+        f"models: [{', '.join(ALL_ALIASES)}]",
+        f"result: {passed} passed, {failed} failed, {skipped} skipped",
+        "---",
+        "",
+        "# AI Platform — Chat Scenario Report",
+        "",
+        f"_Generated {when} · LiteLLM `{LITELLM_URL}` · "
+        f"trace check: {'on' if check_traces else 'off'}_",
+        "",
+        f"**Result: {passed} passed, {failed} failed, {skipped} skipped.**",
+        "",
+        "Export your key once, then any `curl` below re-runs that exact turn "
+        "(full conversation history included) and prints the model's answer:",
+        "",
+        *_code_block(
+            'export LITELLM_KEY="$(microk8s kubectl -n ai-platform get secret '
+            "litellm-secrets -o go-template='{{index .data \"LITELLM_MASTER_KEY\" "
+            "| base64decode}}')\"", "bash"),
+        "",
+        "## Summary",
+        "",
+        "| model | scenario | turns | quality | total (s) | avg/turn (s) | traces |",
+        "|---|---|---|---:|---:|---:|---|",
+    ]
+    for alias, scen, metrics, total_s, jaeger_ok, lf_ok in CONV_METRICS:
+        q_total = sum(1 for m in metrics if _turn_has_keywords(scen, m.idx))
+        q_ok = sum(1 for m in metrics
+                   if _turn_has_keywords(scen, m.idx) and m.quality_ok)
+        avg = sum(m.latency_s for m in metrics) / len(metrics)
+        traces = ("J✓" if jaeger_ok else "J✗") + ("L✓" if lf_ok else "L✗")
+        out.append(f"| `{alias}` | {scen} | {len(metrics)} | {q_ok}/{q_total} | "
+                   f"{total_s:.1f} | {avg:.2f} | {traces} |")
+
+    out += ["", "## Transcripts", ""]
+    for alias, scen, metrics, total_s, jaeger_ok, lf_ok in CONV_METRICS:
+        traces = ("J✓" if jaeger_ok else "J✗") + ("L✓" if lf_ok else "L✗")
+        out += [
+            f"### `{alias}` — {scen}",
+            "",
+            f"_{total_s:.1f}s total · traces {traces}_",
+            "",
+            "| # | question | answer | lat (s) | ok |",
+            "|---:|---|---|---:|:--:|",
+        ]
+        for m in metrics:
+            keyworded = _turn_has_keywords(scen, m.idx)
+            ok = ("✓" if m.quality_ok else "✗") if keyworded else "·"
+            out.append(f"| {m.idx} | {_md_cell(m.prompt)} | {_md_cell(m.reply)} "
+                       f"| {m.latency_s:.1f} | {ok} |")
+        out.append("")
+        # Per-turn full answer + runnable curl. Blank lines (no indentation) let
+        # MDX parse the markdown children inside the <details> JSX element.
+        for m in metrics:
+            out += [
+                "<details>",
+                f"<summary>turn {m.idx} — full answer · re-run</summary>",
+                "",
+                "**Answer:**",
+                "",
+                *_code_block(m.reply, "text"),
+                "",
+                "**Re-run this turn:**",
+                "",
+                *_code_block(_curl_for(alias, m.request_messages, m.max_tokens), "bash"),
+                "",
+                "</details>",
+                "",
+            ]
+    return "\n".join(out)
+
+
+
+
+# ─── HTML report (single file; embeds the MDX, renders it via @mdx-js) ───────
+
+_HTML_CSS = """
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  margin:2rem auto;max-width:1040px;padding:0 1rem;color:#1b1f23;line-height:1.5}
+h1,h2,h3{line-height:1.25}h3{margin-top:1.6rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0}
+th,td{border:1px solid #d0d7de;padding:.4rem .6rem;text-align:left;
+  vertical-align:top;font-size:.92rem}
+th{background:#f6f8fa}.num{text-align:right}.okcol{text-align:center;font-weight:700}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:.7rem;
+  overflow:auto;font-size:.84rem}
+code{background:#eff1f3;padding:.1rem .3rem;border-radius:4px}pre code{background:none;padding:0}
+.meta{color:#57606a;font-size:.9rem}
+.result{font-weight:700;padding:.35rem .7rem;border-radius:6px;display:inline-block}
+.result.ok{background:#dafbe1;color:#1a7f37}.result.bad{background:#ffebe9;color:#cf222e}
+details{border:1px solid #d0d7de;border-radius:6px;padding:.3rem .6rem;margin:.3rem 0}
+summary{cursor:pointer;font-weight:600}
+blockquote{color:#57606a;border-left:3px solid #d0d7de;margin:.5rem 0;padding:.1rem .8rem}
+.pass{color:#1a7f37}.fail{color:#cf222e}.na{color:#8c959f}.err{color:#cf222e}
+"""
+
+
+def _h(s: str) -> str:
+    return html.escape(str(s), quote=True)
+
+
+# Vendored, self-contained MDX render bundle (see tests/vendor/README.md). Inlined
+# into the report so it renders fully offline — no CDN. Exposes window.renderMDX.
+_VENDOR_BUNDLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "vendor", "mdx-bundle.js")
+
+# Classic (non-module) bootstrap: the inlined IIFE sets window.renderMDX; compile
+# + mount the embedded MDX, falling back to the raw source on any error.
+_MDX_BOOTSTRAP_JS = """
+(function () {
+  var src = document.getElementById('mdx-source').textContent;
+  var root = document.getElementById('root');
+  function showRaw(err) {
+    root.innerHTML = '<p class="err"><b>Could not render MDX:</b> ' +
+      ((err && err.message) || err) + '</p>';
+    var pre = document.createElement('pre'); pre.textContent = src;
+    root.appendChild(pre);
+  }
+  try {
+    var p = window.renderMDX(src, root);
+    if (p && p.catch) p.catch(showRaw);
+  } catch (err) { showRaw(err); }
+})();
+"""
+
+
+def write_html_report(path: str, mdx_text: str, when: str) -> None:
+    """Single self-contained, fully-offline HTML report: it embeds the full MDX
+    document and the vendored @mdx-js render bundle, and renders the MDX in-browser.
+
+    The MDX lives in a <script type="text/mdx"> tag (not fetched), so it works from
+    a `file://` URL — the one HTML file *is* the renderable MDX, with no network.
+    """
+    # Only the literal `</script` can close an embedding <script> element early.
+    embedded = mdx_text.replace("</script", "<\\/script")
+    try:
+        with open(_VENDOR_BUNDLE, encoding="utf-8") as f:
+            bundle = f.read().replace("</script", "<\\/script")
+        bundle_tag = f"<script>{bundle}</script>"
+    except OSError:
+        bundle_tag = ("<script>window.renderMDX=function(){"
+                      "throw new Error('vendored mdx-bundle.js missing — see "
+                      "tests/vendor/README.md')};</script>")
+    parts = [
+        "<!doctype html><html lang=en><head><meta charset=utf-8>",
+        "<meta name=viewport content='width=device-width,initial-scale=1'>",
+        f"<title>Chat Scenario Report — {_h(when)}</title>",
+        f"<style>{_HTML_CSS}</style></head><body>",
+        "<div id=root><p class=meta>Rendering MDX…</p></div>",
+        '<script type="text/mdx" id="mdx-source">',
+        embedded,
+        "</script>",
+        bundle_tag,
+        f"<script>{_MDX_BOOTSTRAP_JS}</script>",
+        "</body></html>",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+
+
 # ─── JUnit output ───────────────────────────────────────────────────────────
 
 def write_junit(path: str, results: list[Result]) -> None:
@@ -486,14 +728,31 @@ def main() -> int:
                              "(repeatable)")
     parser.add_argument("--no-trace-check", action="store_true",
                         help="skip Jaeger/Langfuse trace verification (faster)")
+    parser.add_argument("--report-dir",
+                        default=os.path.dirname(os.path.abspath(__file__)),
+                        help="directory for the report_<timestamp>.html (default: "
+                             "this script's dir)")
+    parser.add_argument("--no-report", action="store_true",
+                        help="don't write the HTML report")
+    parser.add_argument("--no-open", action="store_true",
+                        help="don't open the report in a browser when done")
     args = parser.parse_args()
 
     check_traces = not args.no_trace_check
 
+    global ALL_ALIASES
+    try:
+        ALL_ALIASES = discover_aliases()
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR: could not discover models from {LITELLM_URL}/v1/models: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    src = "ALIASES env" if os.environ.get("ALIASES", "").strip() else "/v1/models"
+
     print(f"LiteLLM:  {LITELLM_URL}")
     print(f"Jaeger:   {JAEGER_URL}")
     print(f"Langfuse: {LANGFUSE_URL}")
-    print(f"Models:   {ALL_ALIASES}")
+    print(f"Models:   {ALL_ALIASES}  (from {src})")
     print(f"Scenarios:{[s.name for s in SCENARIOS]}")
     print(f"Timeout:  {TIMEOUT}s  Quality threshold: {QUALITY_THRESHOLD:.0%}  "
           f"Trace check: {check_traces}\n")
@@ -509,6 +768,24 @@ def main() -> int:
 
     print_qa_report()
     print_timing_report()
+
+    if not args.no_report:
+        when = time.strftime("%Y-%m-%d %H:%M:%S")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        html_path = os.path.join(args.report_dir, f"report_{stamp}.html")
+        mdx_text = build_mdx_text(r.results, when, not args.no_trace_check)
+        write_html_report(html_path, mdx_text, when)
+        print(f"\nReport -> {html_path}  (HTML embedding MDX, rendered via @mdx-js/mdx)")
+        # Open the report in the browser — it renders the embedded MDX.
+        if not args.no_open:
+            url = "file://" + urllib.request.pathname2url(os.path.abspath(html_path))
+            try:
+                if webbrowser.open(url):
+                    print(f"Opened in browser: {url}")
+                else:
+                    print(f"Could not open a browser; view it at {url}")
+            except Exception as e:  # noqa: BLE001
+                print(f"Could not open a browser ({e}); view it at {url}")
 
     if args.junit:
         write_junit(args.junit, r.results)

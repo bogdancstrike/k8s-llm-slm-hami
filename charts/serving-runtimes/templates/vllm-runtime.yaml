@@ -125,6 +125,8 @@ spec:
             --disable-log-requests \
             --otlp-traces-endpoint="$${OTEL_EXPORTER_OTLP_ENDPOINT}" \
             --collect-detailed-traces=all \
+            --enable-auto-tool-choice \
+            --tool-call-parser=hermes \
             $CHAT_TEMPLATE_ARG
 
       ports:

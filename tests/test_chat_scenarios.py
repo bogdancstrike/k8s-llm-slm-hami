@@ -388,6 +388,30 @@ def run_scenario(alias: str, scenario: Scenario, check_traces: bool) -> str:
 
 # ─── Reporting ──────────────────────────────────────────────────────────────
 
+def _oneline(s: str, width: int) -> str:
+    """Collapse whitespace/newlines and truncate to `width` for table cells."""
+    s = " ".join(s.split())
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def print_qa_report() -> None:
+    """Print each conversation as a question → answer table for easy review."""
+    if not CONV_METRICS:
+        return
+    qw, aw = 46, 42
+    print("\n── Conversation transcripts (question → answer) ────────────")
+    for alias, scen, metrics, total_s, jaeger_ok, lf_ok in CONV_METRICS:
+        traces = ("J✓" if jaeger_ok else "J✗") + ("L✓" if lf_ok else "L✗")
+        print(f"\n▸ {alias} / {scen}   ({total_s:.1f}s total, traces {traces})")
+        print(f"  {'#':>2}  {'question':<{qw}}  {'answer':<{aw}}  {'lat':>5}  ok")
+        print("  " + "-" * (2 + 2 + qw + 2 + aw + 2 + 5 + 2 + 2))
+        for m in metrics:
+            keyworded = _turn_has_keywords(scen, m.idx)
+            ok = ("✓" if m.quality_ok else "✗") if keyworded else "·"
+            print(f"  {m.idx:>2}  {_oneline(m.prompt, qw):<{qw}}  "
+                  f"{_oneline(m.reply, aw):<{aw}}  {m.latency_s:>4.1f}s  {ok}")
+
+
 def print_timing_report() -> None:
     if not CONV_METRICS:
         return
@@ -483,6 +507,7 @@ def main() -> int:
                   lambda a=alias, s=scenario: run_scenario(a, s, check_traces))
         print()
 
+    print_qa_report()
     print_timing_report()
 
     if args.junit:

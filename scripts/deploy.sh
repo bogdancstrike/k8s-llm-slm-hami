@@ -59,29 +59,48 @@ WIPE_EXTRA="${WIPE_EXTRA:-}"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
-log()  { echo -e "\033[1;36m>>> $*\033[0m"; }
-warn() { echo -e "\033[1;33m!!! $*\033[0m" >&2; }
-die()  { echo -e "\033[1;31mXXX $*\033[0m" >&2; exit 1; }
+# ANSI Color Codes
+export BOLD="\033[1m"
+export NC="\033[0m"
+export BLUE="\033[34m"
+export CYAN="\033[36m"
+export GREEN="\033[32m"
+export YELLOW="\033[33m"
+export RED="\033[31m"
+export MAGENTA="\033[35m"
+
+export BG_CYAN="\033[46m\033[30m"
+
+log()     { echo -e "${CYAN}${BOLD}⌁${NC} $*"; }
+info()    { echo -e "${BLUE}${BOLD}ℹ${NC} $*"; }
+success() { echo -e "${GREEN}${BOLD}✔${NC} $*"; }
+warn()    { echo -e "${YELLOW}${BOLD}⚠ WARNING:${NC} $*" >&2; }
+die()     { echo -e "${RED}${BOLD}✘ ERROR:${NC} $*" >&2; exit 1; }
+
+phase() {
+  local num="$1" title="$2"
+  echo -e "\n${BOLD}${BG_CYAN}  PHASE $num — $title  ${NC}\n"
+}
 
 confirm() {
   if [[ "${1:-}" == "--yes" || "${CONFIRM:-}" == "yes" ]]; then
     return 0
   fi
-  cat <<'EOF'
-
-This will UNINSTALL every PoC component in the cluster and reinstall it.
-You will lose:
-  - All running model pods (weights re-download from HF on next boot)
-  - All Langfuse projects, users and API keys
-  - All LiteLLM model registrations (re-created by registration Jobs)
-  - All Jaeger traces (in-memory backend)
-  - Grafana initial credentials (rotated on install)
-  - The model-cache PVC (50 Gi of GGUF + HF weight downloads)
-
-Pre-existing releases NOT touched: gpu-operator, nvidia-device-plugin.
-
-Type YES (uppercase) to proceed, anything else to abort:
-EOF
+  echo -e "\n${BOLD}${RED}⚠️  WARNING: DESTRUCTIVE ACTION AHEAD${NC}"
+  echo -e "${RED}======================================================================${NC}"
+  echo -e "This will ${BOLD}${RED}UNINSTALL${NC} every PoC component in the cluster and reinstall it."
+  echo -e "You will ${BOLD}${RED}LOSE${NC}:"
+  echo -e "  ${RED}•${NC} All running model pods (weights re-download from HF on next boot)"
+  echo -e "  ${RED}•${NC} All Langfuse projects, users and API keys"
+  echo -e "  ${RED}•${NC} All LiteLLM model registrations (re-created by registration Jobs)"
+  echo -e "  ${RED}•${NC} All Jaeger traces (in-memory backend)"
+  echo -e "  ${RED}•${NC} Grafana initial credentials (rotated on install)"
+  echo -e "  ${RED}•${NC} The model-cache PVC (50 Gi of GGUF + HF weight downloads)"
+  echo -e ""
+  echo -e "${BLUE}Note: Pre-existing releases NOT touched: gpu-operator, nvidia-device-plugin.${NC}"
+  echo -e "${RED}======================================================================${NC}\n"
+  
+  echo -ne "${BOLD}${YELLOW}Type YES (uppercase) to proceed, anything else to abort: ${NC}"
   read -r ans
   [[ "$ans" == "YES" ]] || die "aborted by user"
 }
@@ -149,6 +168,15 @@ secret_val() {
   [[ -n "$val" ]] && echo "$val" || echo "<unavailable>"
 }
 
+dep_env_val() {
+  # Extract the value of an environment variable from a Deployment's first container.
+  # Prints the value, or "<unavailable>" if the deployment or env var is missing.
+  local ns="$1" name="$2" env_name="$3" val
+  val=$($KUBECTL -n "$ns" get deployment "$name" \
+          -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$env_name\")].value}" 2>/dev/null) || true
+  [[ -n "$val" ]] && echo "$val" || echo "<unavailable>"
+}
+
 # ─── confirmation ──────────────────────────────────────────────────────────
 
 confirm "$CONFIRM_ARG"
@@ -171,7 +199,7 @@ $KUBECTL get node "$GPU_NODE" >/dev/null || die "node '$GPU_NODE' not found"
 # ─── teardown ──────────────────────────────────────────────────────────────
 
 if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
-  log "phase 1/3 — TEARDOWN"
+  phase "1/3" "TEARDOWN"
 
   # Unstick KRO + KServe CRs before their controllers go away — otherwise the
   # namespace deletion below will hang on finalizers we can no longer clear.
@@ -296,7 +324,7 @@ fi
 
 # ─── install ───────────────────────────────────────────────────────────────
 
-log "phase 2/3 — INSTALL"
+phase "2/3" "INSTALL"
 
 log "adding helm repos"
 $HELM repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
@@ -411,7 +439,7 @@ $HELM upgrade --install ai-models "$ROOT_DIR/charts/ai-models" \
 
 # ─── post-install ──────────────────────────────────────────────────────────
 
-log "phase 3/3 — POST-INSTALL"
+phase "3/3" "POST-INSTALL"
 log "ingresses:"
 $KUBECTL get ingress -A
 
@@ -423,38 +451,38 @@ $KUBECTL -n inference get pods -l serving.kserve.io/inferenceservice -o wide || 
 
 GRAFANA_PW=$(secret_val observability kube-prom-stack-grafana admin-password)
 LITELLM_KEY=$(secret_val ai-platform litellm-secrets LITELLM_MASTER_KEY)
+LANGFUSE_EMAIL=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_USER_EMAIL)
+LANGFUSE_PW=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_USER_PASSWORD)
+LANGFUSE_PUB=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_PROJECT_PUBLIC_KEY)
+LANGFUSE_SEC=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_PROJECT_SECRET_KEY)
 
-cat <<EOF
-
-==============================================================================
-  Deploy complete — AI Platform PoC
-
-  Components deployed (one Helm release per app):
-    cert-manager, kube-prometheus-stack (Prometheus/Grafana/Alertmanager),
-    HAMi vGPU scheduler, KRO, KServe (+CRDs), postgresql, litellm, langfuse,
-    otel-collector, jaeger, open-webui, serving-runtimes, monitoring,
-    KRO templates, and ai-models (3 example InferenceEndpoints).
-
-  Map *.local.ro hostnames to 127.0.0.1 once on your workstation:
-    sudo ./scripts/update-local-hosts.sh
-
-  ----------------------------------------------------------------------------
-  Service       Access URL                  Login
-  ----------------------------------------------------------------------------
-  Open WebUI    http://open-webui.local.ro  create admin on first visit (signup)
-  Langfuse      http://langfuse.local.ro    sign up on first visit; default
-                                            project: ai-platform
-  LiteLLM       http://litellm.local.ro/ui  user: admin
-                                            password: ${LITELLM_KEY}
-  Grafana       http://grafana.local.ro     user: admin
-                                            password: ${GRAFANA_PW}
-  Jaeger        http://jaeger.local.ro      no authentication
-  ----------------------------------------------------------------------------
-
-  API access:
-    LiteLLM bearer token : ${LITELLM_KEY}
-
-  Smoke test:
-    LITELLM_KEY='${LITELLM_KEY}' python3 tests/e2e_smoke.py
-==============================================================================
-EOF
+echo -e "${GREEN}${BOLD}┌────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${GREEN}${BOLD}│                          🚀 DEPLOY COMPLETE — AI PLATFORM PoC                          │${NC}"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│ %-86s │\n" "All components successfully deployed to the cluster."
+printf "│ %-86s │\n" ""
+printf "│ %-86s │\n" "🔧 Map *.local.ro hostnames to 127.0.0.1 on your workstation:"
+printf "│     %-80s │\n" "sudo ./scripts/update-local-hosts.sh"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│ %-86s │\n" "🌐 SERVICE ACCESS & CREDENTIALS"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "Open WebUI" "http://open-webui.local.ro" "Signup admin on first visit"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "Langfuse" "http://langfuse.local.ro" "user: admin@local.test"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "" "" "pass: ChangeMe-PoC-Only-2026"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "LiteLLM" "http://litellm.local.ro/ui" "user: admin"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "" "" "pass: ${LITELLM_KEY}"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "Grafana" "http://grafana.local.ro" "user: admin"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "" "" "pass: ${GRAFANA_PW}"
+printf "│   ${BOLD}%-10s${NC}  ${CYAN}%-30s${NC}  %-38s │\n" "Jaeger" "http://jaeger.local.ro" "No authentication required"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│ %-86s │\n" "🔑 API ACCESS KEYS"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│   %-22s : ${YELLOW}%-57s${NC} │\n" "LiteLLM Bearer Token" "${LITELLM_KEY}"
+printf "│   %-22s : ${YELLOW}%-57s${NC} │\n" "Langfuse Public Key" "${LANGFUSE_PUB}"
+printf "│   %-22s : ${YELLOW}%-57s${NC} │\n" "Langfuse Secret Key" "${LANGFUSE_SEC}"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│ %-86s │\n" "⚡ SMOKE TEST"
+echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
+printf "│   %-83s │\n" "Run E2E smoke tests:"
+printf "│     %-80s │\n" "LITELLM_KEY='${LITELLM_KEY}' python3 tests/e2e_smoke.py"
+echo -e "${GREEN}${BOLD}└────────────────────────────────────────────────────────────────────────────────────────┘${NC}"

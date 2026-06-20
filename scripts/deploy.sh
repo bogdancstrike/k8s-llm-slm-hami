@@ -325,8 +325,22 @@ $HELM upgrade --install hami "$ROOT_DIR/charts/hami" \
   --namespace kube-system --wait --timeout 10m
 
 log "installing KRO controller"
+# The KRO CRDs live in the chart's crds/ dir, which Helm only applies when the
+# CRD is ABSENT. Teardown deletes them with --wait=false, so a fresh `kro`
+# install can race a still-Terminating CRD and silently skip it. Wait for the
+# CRDs to be fully gone first so the install recreates them cleanly.
+for crd in resourcegraphdefinitions.kro.run instances.kro.run; do
+  $KUBECTL wait --for=delete "crd/$crd" --timeout=120s >/dev/null 2>&1 || true
+done
 $HELM upgrade --install kro "$ROOT_DIR/charts/kro" \
   --namespace kro-system --create-namespace --wait --timeout 10m
+log "verifying KRO CRDs are established"
+if ! $KUBECTL wait --for=condition=Established crd/resourcegraphdefinitions.kro.run --timeout=60s >/dev/null 2>&1; then
+  warn "KRO CRDs missing after install — applying them from the chart"
+  $HELM template kro "$ROOT_DIR/charts/kro" --include-crds --namespace kro-system \
+    | $KUBECTL apply -n kro-system -f - >/dev/null
+  $KUBECTL wait --for=condition=Established crd/resourcegraphdefinitions.kro.run --timeout=120s
+fi
 
 log "installing KServe CRDs"
 $HELM upgrade --install kserve-crd "$ROOT_DIR/charts/kserve-crd" \

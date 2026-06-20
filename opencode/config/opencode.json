@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM",
+      "options": {
+        "baseURL": "http://litellm.local.ro/v1"
+      },
+      "models": {
+        "gemma-1b-fast": {
+          "name": "Gemma 1b Fast"
+        },
+        "qwen-3b-cpu": {
+          "name": "Qwen 3b Cpu"
+        },
+        "smollm3-3b-quality": {
+          "name": "Smollm3 3b Quality"
+        }
+      }
+    }
+  }
+}

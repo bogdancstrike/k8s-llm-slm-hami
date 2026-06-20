@@ -92,6 +92,10 @@ opentelemetry-collector:
           queue_size: 1000
         retry_on_failure:
           enabled: true
+      otlphttp/langfuse:
+        endpoint: "http://langfuse-web.ai-platform.svc.cluster.local:3000/api/public/otel"
+        headers:
+          Authorization: "Basic cGstbGYtMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxOnNrLWxmLTAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQ=="
       debug:
         verbosity: basic
       prometheus:
@@ -103,7 +107,7 @@ opentelemetry-collector:
         traces:
           receivers: [otlp]
           processors: [memory_limiter, resource, batch]
-          exporters: [otlp/jaeger, debug]
+          exporters: [otlp/jaeger, debug, otlphttp/langfuse]
         metrics:
           receivers: [otlp, prometheus]
           processors: [memory_limiter, resource, batch]

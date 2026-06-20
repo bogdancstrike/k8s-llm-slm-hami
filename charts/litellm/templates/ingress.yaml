@@ -1,19 +1,21 @@
+{{- if .Values.ingress.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: litellm
-  namespace: ai-platform
+  name: {{ include "litellm.name" . }}
+  namespace: {{ .Values.namespace }}
 spec:
-  ingressClassName: public
+  ingressClassName: {{ .Values.ingress.className }}
   rules:
-    - host: litellm.local.ro
+    - host: {{ .Values.ingress.host }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: litellm
+                name: {{ include "litellm.name" . }}
                 port:
                   name: http
+{{- end }}

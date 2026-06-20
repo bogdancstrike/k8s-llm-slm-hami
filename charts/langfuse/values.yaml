@@ -1,1 +1,79 @@
-{}
+# Langfuse — configuration for the vendored upstream chart (langfuse-k8s).
+# Values are namespaced under the `langfuse` subchart key. Chart 1.5.35
+# (Langfuse v3). The chart is self-contained: it deploys its own PostgreSQL,
+# ClickHouse, Redis/Valkey and S3/MinIO (deploy: true defaults below).
+langfuse:
+  langfuse:
+    # PoC secrets — rotate for any real use.
+    salt:
+      value: "langfuse-salt-change-me-please"
+    encryptionKey:
+      value: "0000000000000000000000000000000000000000000000000000000000000000"
+    nextauth:
+      url: http://langfuse.local.ro
+      secret:
+        value: "langfuse-nextauth-secret-change-me-32"
+
+    image:
+      tag: "3"
+
+    web:
+      replicas: 1
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+    worker:
+      replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+
+    ingress:
+      enabled: true
+      className: public
+      hosts:
+        - host: langfuse.local.ro
+          paths:
+            - path: /
+              pathType: Prefix
+
+  # Bundled backing services (single-node PoC sizing).
+  postgresql:
+    deploy: true
+    auth:
+      username: langfuse
+      password: "langfuse-pg-change-me"
+      database: langfuse
+    primary:
+      persistence:
+        storageClass: microk8s-hostpath
+  clickhouse:
+    deploy: true
+    replicaCount: 1
+    auth:
+      password: "langfuse-ch-change-me"
+    persistence:
+      storageClass: microk8s-hostpath
+  redis:
+    deploy: true
+    architecture: standalone
+    auth:
+      password: "langfuse-redis-change-me"
+    master:
+      persistence:
+        storageClass: microk8s-hostpath
+  s3:
+    deploy: true
+    auth:
+      rootUser: langfuse
+      rootPassword: "langfuse-minio-change-me"
+    persistence:
+      storageClass: microk8s-hostpath

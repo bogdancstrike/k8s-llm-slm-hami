@@ -55,7 +55,7 @@ spec:
 
   containers:
     - name: kserve-container
-      image: ghcr.io/ggerganov/llama.cpp:server-b4404
+      image: {{ .Values.llamacpp.image }}
 
       # Wrap llama-server in shell that downloads GGUF if missing, then exec server.
       # Using exec ensures llama-server becomes PID 1, getting signals correctly.

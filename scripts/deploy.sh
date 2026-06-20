@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-microk8s.sh — fresh teardown + redeploy of the QSINT AI Platform PoC.
+# deploy.sh — fresh teardown + redeploy of the AI Platform PoC.
 #
 # Scope: only the PoC stack we own (the charts under charts/, one Helm release
 # per app). Leaves pre-existing,
@@ -8,15 +8,22 @@
 # specific extra releases by name.
 #
 # Usage:
-#   ./scripts/deploy-microk8s.sh                # interactive, with confirmation
-#   ./scripts/deploy-microk8s.sh --yes          # skip the confirmation prompt
-#   CONFIRM=yes ./scripts/deploy-microk8s.sh    # equivalent
-#   SKIP_TEARDOWN=1 ./scripts/deploy-microk8s.sh   # only install/upgrade
-#   HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy-microk8s.sh
+#   ./scripts/deploy.sh                # MicroK8s (default), interactive
+#   ./scripts/deploy.sh --microk8s     # MicroK8s explicitly
+#   ./scripts/deploy.sh --k8s          # classic Kubernetes (kubectl + helm)
+#   ./scripts/deploy.sh --k8s --yes    # classic k8s, skip confirmation
+#   CONFIRM=yes ./scripts/deploy.sh    # equivalent to --yes
+#   SKIP_TEARDOWN=1 ./scripts/deploy.sh   # only install/upgrade
+#   HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy.sh
+#
+# Mode (--microk8s | --k8s) selects the default kubectl/helm commands:
+#   --microk8s : KUBECTL="microk8s kubectl", HELM="microk8s helm3"  (default)
+#   --k8s      : KUBECTL="kubectl",          HELM="helm"
+# Explicit KUBECTL=/HELM= env vars always override the mode defaults.
 #
 # Env:
-#   KUBECTL              kubectl command       (default: `microk8s kubectl`)
-#   HELM                 helm command          (default: `microk8s helm3`)
+#   KUBECTL              kubectl command       (overrides the mode default)
+#   HELM                 helm command          (overrides the mode default)
 #   GPU_NODE             node to label gpu=on  (default: `bogdan`)
 #   HUGGINGFACE_TOKEN    optional HF API token; if set, creates
 #                        secret/huggingface-token in `inference`.
@@ -26,9 +33,27 @@
 
 set -euo pipefail
 
+# ─── argument parsing (mode + flags, any order) ──────────────────────────────
+MODE="microk8s"
+CONFIRM_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --microk8s)      MODE="microk8s" ;;
+    --k8s|--kubectl) MODE="k8s" ;;
+    --yes|-y)        CONFIRM_ARG="--yes" ;;
+    -h|--help)       sed -n '2,25p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $arg (use --microk8s | --k8s | --yes)" >&2; exit 2 ;;
+  esac
+done
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KUBECTL="${KUBECTL:-microk8s kubectl}"
-HELM="${HELM:-microk8s helm3}"
+if [[ "$MODE" == "k8s" ]]; then
+  KUBECTL="${KUBECTL:-kubectl}"
+  HELM="${HELM:-helm}"
+else
+  KUBECTL="${KUBECTL:-microk8s kubectl}"
+  HELM="${HELM:-microk8s helm3}"
+fi
 GPU_NODE="${GPU_NODE:-bogdan}"
 WIPE_EXTRA="${WIPE_EXTRA:-}"
 
@@ -126,9 +151,10 @@ secret_val() {
 
 # ─── confirmation ──────────────────────────────────────────────────────────
 
-confirm "${1:-}"
+confirm "$CONFIRM_ARG"
 
-log "starting QSINT AI Platform fresh deploy"
+log "starting AI Platform fresh deploy"
+log "mode:    $MODE"
 log "root:    $ROOT_DIR"
 log "kubectl: $KUBECTL"
 log "helm:    $HELM"
@@ -161,7 +187,7 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
 
   # Uninstall in REVERSE dependency order so consumers go before their CRDs.
   uninstall_release ai-models            inference   5m
-  uninstall_release qsint-kro-templates  kro-system  5m
+  uninstall_release kro-templates  kro-system  5m
   uninstall_release serving-runtimes     inference   5m
   uninstall_release monitoring           observability 5m
   uninstall_release open-webui           ai-platform 5m
@@ -170,7 +196,7 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
   uninstall_release litellm              ai-platform 5m
   uninstall_release langfuse             ai-platform 5m
   uninstall_release postgresql           ai-platform 10m
-  uninstall_release qsint-namespaces     default     5m
+  uninstall_release namespaces     default     5m
   uninstall_release kserve               kserve      10m
   uninstall_release kserve-crd           kserve      5m
   uninstall_release kro                  kro-system  5m
@@ -281,42 +307,43 @@ $HELM repo update >/dev/null
 log "labeling GPU node ($GPU_NODE) with gpu=on"
 $KUBECTL label node "$GPU_NODE" gpu=on --overwrite
 
-for chart in qsint-cert-manager qsint-observability-stack \
-             qsint-hami qsint-kro qsint-kserve-crd qsint-kserve; do
+for chart in cert-manager observability-stack \
+             hami kro kserve-crd kserve; do
   helm_dep_update "charts/$chart"
 done
 
 log "installing cert-manager"
-$HELM upgrade --install cert-manager "$ROOT_DIR/charts/qsint-cert-manager" \
+$HELM upgrade --install cert-manager "$ROOT_DIR/charts/cert-manager" \
   --namespace cert-manager --create-namespace --wait --timeout 10m
 
 log "installing kube-prometheus-stack (Prometheus + Grafana + Alertmanager)"
-$HELM upgrade --install kube-prom-stack "$ROOT_DIR/charts/qsint-observability-stack" \
+$HELM upgrade --install kube-prom-stack "$ROOT_DIR/charts/observability-stack" \
   --namespace observability --create-namespace --wait --timeout 15m
 
 log "installing HAMi vGPU scheduler"
-$HELM upgrade --install hami "$ROOT_DIR/charts/qsint-hami" \
+$HELM upgrade --install hami "$ROOT_DIR/charts/hami" \
   --namespace kube-system --wait --timeout 10m
 
 log "installing KRO controller"
-$HELM upgrade --install kro "$ROOT_DIR/charts/qsint-kro" \
+$HELM upgrade --install kro "$ROOT_DIR/charts/kro" \
   --namespace kro-system --create-namespace --wait --timeout 10m
 
 log "installing KServe CRDs"
-$HELM upgrade --install kserve-crd "$ROOT_DIR/charts/qsint-kserve-crd" \
+$HELM upgrade --install kserve-crd "$ROOT_DIR/charts/kserve-crd" \
   --namespace kserve --create-namespace --wait --timeout 10m
 
 log "installing KServe controller"
-$HELM upgrade --install kserve "$ROOT_DIR/charts/qsint-kserve" \
+$HELM upgrade --install kserve "$ROOT_DIR/charts/kserve" \
   --namespace kserve --wait --timeout 10m
 
-log "installing QSINT namespaces (ai-platform, inference)"
-$HELM upgrade --install qsint-namespaces "$ROOT_DIR/charts/qsint-namespaces" \
+log "installing namespaces (ai-platform, inference)"
+$HELM upgrade --install namespaces "$ROOT_DIR/charts/namespaces" \
   --namespace default --wait --timeout 5m
 
 # ── Platform apps (each app is now its own chart) ───────────────────────────
-# Postgres first — LiteLLM and Langfuse block on it via init containers.
-log "installing PostgreSQL (shared LiteLLM + Langfuse DB)"
+# Postgres first — LiteLLM (and Open WebUI) block on it. Langfuse runs its own
+# bundled DB stack (Postgres + ClickHouse + Redis + S3) via its upstream chart.
+log "installing PostgreSQL (shared LiteLLM + Open WebUI DB)"
 $HELM upgrade --install postgresql "$ROOT_DIR/charts/postgresql" \
   --namespace ai-platform --wait --timeout 10m
 
@@ -324,9 +351,12 @@ log "installing LiteLLM (OpenAI-compatible gateway)"
 $HELM upgrade --install litellm "$ROOT_DIR/charts/litellm" \
   --namespace ai-platform --wait --timeout 10m
 
-log "installing Langfuse (LLM tracing UI)"
+# Langfuse v3 (upstream chart) brings ClickHouse/Redis/MinIO — heavier, so a
+# longer timeout, and non-fatal if it lags (the rest of the stack is usable).
+log "installing Langfuse (LLM tracing UI + bundled DB stack)"
 $HELM upgrade --install langfuse "$ROOT_DIR/charts/langfuse" \
-  --namespace ai-platform --wait --timeout 10m
+  --namespace ai-platform --wait --timeout 20m \
+  || warn "langfuse not fully ready yet (continuing) — check 'kubectl -n ai-platform get pods'"
 
 log "installing OpenTelemetry Collector"
 $HELM upgrade --install otel-collector "$ROOT_DIR/charts/otel-collector" \
@@ -336,7 +366,7 @@ log "installing Jaeger (tracing backend + UI)"
 $HELM upgrade --install jaeger "$ROOT_DIR/charts/jaeger" \
   --namespace ai-platform --wait --timeout 10m
 
-log "installing Open WebUI (chat interface)"
+log "installing Open WebUI (chat interface, Postgres-backed)"
 $HELM upgrade --install open-webui "$ROOT_DIR/charts/open-webui" \
   --namespace ai-platform --wait --timeout 10m
 
@@ -355,7 +385,7 @@ $HELM upgrade --install monitoring "$ROOT_DIR/charts/monitoring" \
   --namespace observability --wait --timeout 10m
 
 log "installing KRO templates (InferenceEndpoint RGD)"
-$HELM upgrade --install qsint-kro-templates "$ROOT_DIR/charts/qsint-kro-templates" \
+$HELM upgrade --install kro-templates "$ROOT_DIR/charts/kro-templates" \
   --namespace kro-system --wait --timeout 10m
 
 log "waiting for InferenceEndpoint CRD to be Established"
@@ -383,7 +413,7 @@ LITELLM_KEY=$(secret_val ai-platform litellm-secrets LITELLM_MASTER_KEY)
 cat <<EOF
 
 ==============================================================================
-  Deploy complete — QSINT AI Platform PoC
+  Deploy complete — AI Platform PoC
 
   Components deployed (one Helm release per app):
     cert-manager, kube-prometheus-stack (Prometheus/Grafana/Alertmanager),
@@ -399,7 +429,7 @@ cat <<EOF
   ----------------------------------------------------------------------------
   Open WebUI    http://open-webui.local.ro  create admin on first visit (signup)
   Langfuse      http://langfuse.local.ro    sign up on first visit; default
-                                            project: qsint-ai-platform
+                                            project: ai-platform
   LiteLLM       http://litellm.local.ro/ui  user: admin
                                             password: ${LITELLM_KEY}
   Grafana       http://grafana.local.ro     user: admin

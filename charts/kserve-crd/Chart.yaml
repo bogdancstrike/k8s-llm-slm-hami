@@ -1,9 +1,9 @@
 apiVersion: v2
-name: qsint-kserve
-description: Wrapper for KServe in RawDeployment mode.
+name: kserve-crd
+description: Wrapper for KServe CRDs.
 type: application
 version: 0.1.0
 dependencies:
-  - name: kserve
+  - name: kserve-crd
     version: v0.13.0
     repository: oci://ghcr.io/kserve/charts

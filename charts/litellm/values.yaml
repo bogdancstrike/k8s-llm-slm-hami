@@ -1,1 +1,62 @@
-{}
+# LiteLLM gateway — fully configurable.
+nameOverride: ""
+namespace: ai-platform
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/berriai/litellm
+  tag: main-v1.52.0-stable
+  pullPolicy: IfNotPresent
+
+# Secrets / auth (PoC defaults — rotate for real use).
+masterKey: "sk-litellm-master-change-me"
+saltKey: "salt-change-me-32-chars-minimum-x"
+
+# Shared PostgreSQL (the bitnami `postgresql` release in this namespace).
+database:
+  host: postgresql.ai-platform.svc.cluster.local
+  port: 5432
+  user: platform
+  password: "ChangeMe-PoC-Only-2026"
+  name: litellm
+# Image used by the wait-for-postgres init container.
+waitImage: postgres:16-alpine
+
+# Observability wiring.
+otelEndpoint: "http://otel-collector.ai-platform.svc.cluster.local:4317"
+langfuse:
+  host: "http://langfuse-web.ai-platform.svc.cluster.local:3000"
+  publicKey: ""
+  secretKey: ""
+
+service:
+  type: ClusterIP
+  port: 4000
+
+ingress:
+  enabled: true
+  className: public
+  host: litellm.local.ro
+
+# Mirror the master key into the `inference` namespace for the register Jobs.
+secretMirror:
+  enabled: true
+  namespace: inference
+
+serviceMonitor:
+  enabled: true
+  releaseLabel: kube-prom-stack
+  interval: 30s
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

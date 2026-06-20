@@ -1,4 +1,4 @@
-# QSINT AI Platform — Documentation (Install & Operations)
+# AI Platform — Documentation (Install & Operations)
 
 > Companion docs: [architecture.md](architecture.md) (design & internals) ·
 > [deploy_new_models.md](deploy_new_models.md) (adding models) ·
@@ -41,7 +41,7 @@ observable, chat-accessible model in minutes.
 |---|---|
 | Target cluster | MicroK8s, single node, `gpu=on` label |
 | GPU | NVIDIA RTX 3080 10 GB, vGPU-partitioned by HAMi |
-| Install | Helm charts in `charts/`, applied by `scripts/deploy-microk8s.sh` |
+| Install | Helm charts in `charts/`, applied by `scripts/deploy.sh` |
 | Runtimes | KServe `ClusterServingRuntime` — vLLM (GPU) + llama.cpp (CPU) |
 | Abstraction | KRO `InferenceEndpoint` CRD (one YAML per model) |
 | Gateway | LiteLLM (OpenAI-compatible) |
@@ -74,7 +74,7 @@ driver/device plugin must be present on the host).
 ### Cluster expectations
 
 - Single node, node name `bogdan` (or override `GPU_NODE` for
-  `scripts/deploy-microk8s.sh`).
+  `scripts/deploy.sh`).
 - The node carries `gpu=on` (the script sets it).
 - `*.local.ro` hostnames resolve to the node — use
   `scripts/update-local-hosts.sh`.
@@ -88,18 +88,18 @@ driver/device plugin must be present on the host).
 sudo ./scripts/update-local-hosts.sh
 
 # 2. Install the whole stack (idempotent — re-run = upgrade)
-./scripts/deploy-microk8s.sh
+./scripts/deploy.sh
 
 # 3. (Optional) load a Hugging Face token for gated models
 microk8s kubectl -n inference patch secret huggingface-token --type merge \
   -p '{"stringData":{"token":"hf_xxx"}}'
 #    …or pass it to the script up front:
-HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy-microk8s.sh
+HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy.sh
 ```
 
 ### What the script does
 
-`scripts/deploy-microk8s.sh` is the canonical install. It:
+`scripts/deploy.sh` is the canonical install. It:
 
 1. Confirms intent (interactive, or `--yes` / `CONFIRM=yes`).
 2. Tears down any prior PoC releases/namespaces/CRDs (skip with
@@ -111,10 +111,10 @@ HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy-microk8s.sh
 
    ```text
    cert-manager → kube-prometheus-stack → HAMi → KRO →
-   KServe CRDs → KServe → qsint-namespaces →
+   KServe CRDs → KServe → namespaces →
    postgresql → litellm → langfuse → otel-collector → jaeger →
    open-webui → serving-runtimes → monitoring →
-   qsint-kro-templates → ai-models
+   kro-templates → ai-models
    ```
 
 6. Prints a summary with access URLs and live credentials.
@@ -237,7 +237,7 @@ To add your own, see [deploy_new_models.md](deploy_new_models.md).
 
 Auto-imported by the Grafana sidecar from the `monitoring` chart. Key ones:
 **HAMi GPU Split — Native Metrics** (per-pod vRAM/compute) and
-**QSINT — vLLM Inference** (requests, TTFT/TPOT, KV-cache, throughput). KServe
+**AI Platform — vLLM Inference** (requests, TTFT/TPOT, KV-cache, throughput). KServe
 ModelServer/TorchServe/Triton/Knative dashboards are bundled but populate only
 when a matching runtime is deployed. Details in
 [architecture.md §6](architecture.md#6-observability-architecture).
@@ -466,15 +466,15 @@ Manual fallback: Grafana → Dashboards → Import → paste JSON from
 
 ## 14. Upgrades, teardown & redeploy
 
-- **Upgrade / reconcile:** re-run `./scripts/deploy-microk8s.sh` — it is
+- **Upgrade / reconcile:** re-run `./scripts/deploy.sh` — it is
   idempotent and uses `helm upgrade --install` per release. To upgrade only the
   models: `microk8s helm3 upgrade --install ai-models charts/ai-models -n inference`.
-- **Install without teardown:** `SKIP_TEARDOWN=1 ./scripts/deploy-microk8s.sh`.
-- **Full teardown + redeploy:** `./scripts/deploy-microk8s.sh` (the default
+- **Install without teardown:** `SKIP_TEARDOWN=1 ./scripts/deploy.sh`.
+- **Full teardown + redeploy:** `./scripts/deploy.sh` (the default
   flow tears down first). This loses model pods (weights re-download), Langfuse
   projects/keys, LiteLLM registrations (re-created by Jobs), Jaeger traces
   (in-memory), Grafana credentials (rotated), and the model-cache PVC.
-- **Remove extra releases too:** `WIPE_EXTRA="loki tempo" ./scripts/deploy-microk8s.sh`.
+- **Remove extra releases too:** `WIPE_EXTRA="loki tempo" ./scripts/deploy.sh`.
 
 ---
 
@@ -488,14 +488,14 @@ Manual fallback: Grafana → Dashboards → Import → paste JSON from
 │   ├── deploy_new_models.md          adding/updating/removing models
 │   └── documentation.md              this file — install & operations
 ├── charts/                           Helm charts — source of truth (one per app)
-│   ├── qsint-namespaces/             ai-platform, inference namespaces
-│   ├── qsint-cert-manager/           cert-manager wrapper
-│   ├── qsint-observability-stack/    kube-prometheus-stack wrapper
-│   ├── qsint-hami/                   HAMi vGPU wrapper
-│   ├── qsint-kro/                    KRO controller wrapper
-│   ├── qsint-kserve-crd/             KServe CRDs
-│   ├── qsint-kserve/                 KServe wrapper
-│   ├── qsint-kro-templates/          the InferenceEndpoint RGD
+│   ├── namespaces/             ai-platform, inference namespaces
+│   ├── cert-manager/           cert-manager wrapper
+│   ├── observability-stack/    kube-prometheus-stack wrapper
+│   ├── hami/                   HAMi vGPU wrapper
+│   ├── kro/                    KRO controller wrapper
+│   ├── kserve-crd/             KServe CRDs
+│   ├── kserve/                 KServe wrapper
+│   ├── kro-templates/          the InferenceEndpoint RGD
 │   ├── postgresql/                   shared LiteLLM + Langfuse database
 │   ├── litellm/                      LiteLLM gateway + ingress + secret mirror
 │   ├── langfuse/                     Langfuse tracing UI + ingress
@@ -506,7 +506,7 @@ Manual fallback: Grafana → Dashboards → Import → paste JSON from
 │   ├── monitoring/                   Grafana dashboards + HAMi ServiceMonitors
 │   └── ai-models/                    example InferenceEndpoints + register Jobs
 ├── scripts/
-│   ├── deploy-microk8s.sh            one-shot installer / upgrader
+│   ├── deploy.sh            one-shot installer / upgrader
 │   └── update-local-hosts.sh         maps *.local.ro hostnames to 127.0.0.1
 └── tests/
     ├── e2e_smoke.py                  stdlib-only e2e/integration suite

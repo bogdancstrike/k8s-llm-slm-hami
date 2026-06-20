@@ -1,1 +1,17 @@
-{}
+# ai-models — shared config only. Model definitions live one-per-file under
+# templates/ (gemma-1b.yaml, smollm3-3b.yaml, qwen25-3b-cpu.yaml). To add a
+# model, drop a new InferenceEndpoint file in templates/ and apply the chart —
+# KRO deploys it (KServe InferenceService) and registers it in LiteLLM
+# automatically. No need to touch this file.
+namespace: inference
+
+# Shared config for the per-model LiteLLM registration Jobs.
+litellmUrl: "http://litellm.ai-platform.svc.cluster.local:4000"
+registerImage: curlimages/curl:8.10.1
+
+# Shared model-cache PVC mounted by every inference pod.
+modelCache:
+  name: model-cache-pvc
+  size: 50Gi
+  storageClass: microk8s-hostpath
+  accessMode: ReadWriteOnce

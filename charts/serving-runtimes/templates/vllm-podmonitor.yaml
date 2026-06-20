@@ -10,7 +10,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: vllm-inference-pods
-  namespace: inference
+  namespace: {{ .Values.namespace }}
   labels:
     # Match the kube-prometheus-stack Prometheus selector
     release: kube-prom-stack

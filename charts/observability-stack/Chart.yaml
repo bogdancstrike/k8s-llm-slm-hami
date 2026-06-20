@@ -1,5 +1,5 @@
 apiVersion: v2
-name: qsint-observability-stack
+name: observability-stack
 description: Wrapper for kube-prometheus-stack with Grafana ingress and dashboard sidecars.
 type: application
 version: 0.1.0

@@ -4,8 +4,8 @@
 # PoC trade-offs:
 #   - In-memory storage: ~50k spans capacity, lost on pod restart
 #   - Single pod: not HA
-#   - For prod (QSINT): use Jaeger Production with Elasticsearch backend
-#     (reuse your existing QSINT Elasticsearch cluster)
+#   - For prod: use Jaeger Production with Elasticsearch backend
+#     (reuse your existing Elasticsearch cluster)
 #
 # Exposed endpoints:
 #   - 16686 (HTTP)   — Query UI
@@ -17,11 +17,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jaeger
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
   labels:
     app: jaeger
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       app: jaeger
@@ -35,12 +35,13 @@ spec:
     spec:
       containers:
         - name: jaeger
-          image: jaegertracing/all-in-one:1.62.0
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             # Enable OTLP receiver (gRPC + HTTP)
             - "--collector.otlp.enabled=true"
             # Memory storage capacity (max spans kept)
-            - "--memory.max-traces=50000"
+            - "--memory.max-traces={{ .Values.maxTraces }}"
             # Enable Prometheus metrics endpoint
             - "--metrics-backend=prometheus"
             - "--query.base-path=/"
@@ -71,12 +72,7 @@ spec:
               name: admin-http
               protocol: TCP
           resources:
-            requests:
-              cpu: 100m
-              memory: 512Mi
-            limits:
-              cpu: 1
-              memory: 2Gi
+            {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /
@@ -95,7 +91,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: jaeger-collector
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
   labels:
     app: jaeger
 spec:
@@ -116,14 +112,14 @@ spec:
     - name: thrift-http
       port: 14268
       targetPort: 14268
-  type: ClusterIP
+  type: {{ .Values.service.type }}
 ---
 # Query UI service — ingress exposes this at http://jaeger.local.ro
 apiVersion: v1
 kind: Service
 metadata:
   name: jaeger-query
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
   labels:
     app: jaeger
 spec:
@@ -133,16 +129,17 @@ spec:
     - name: query
       port: 16686
       targetPort: 16686
-  type: ClusterIP
+  type: {{ .Values.service.type }}
+{{- if .Values.serviceMonitor.enabled }}
 ---
 # ServiceMonitor for Jaeger internal metrics
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: jaeger
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
   labels:
-    release: kube-prom-stack
+    release: {{ .Values.serviceMonitor.releaseLabel }}
 spec:
   selector:
     matchLabels:
@@ -150,4 +147,5 @@ spec:
   endpoints:
     - port: admin-http
       path: /metrics
-      interval: 30s
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

@@ -7,9 +7,10 @@ opentelemetry-collector:
   replicaCount: 1
 
   # contrib image — required for the k8sattributes + prometheus components.
+  # tag must be the collector version (chart appVersion), not the chart version.
   image:
     repository: otel/opentelemetry-collector-contrib
-    tag: "0.158.2"
+    tag: "0.153.0"
     pullPolicy: IfNotPresent
 
   command:
@@ -78,7 +79,7 @@ opentelemetry-collector:
             value: poc
             action: upsert
           - key: service.platform
-            value: qsint-ai-platform
+            value: ai-platform
             action: upsert
     exporters:
       otlp/jaeger:

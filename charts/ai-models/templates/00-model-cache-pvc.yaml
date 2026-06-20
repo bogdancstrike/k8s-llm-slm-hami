@@ -1,30 +1,17 @@
 ---
 # Shared PVC for HuggingFace/GGUF model cache across all inference pods.
-# MicroK8s hostpath is RWO. On this single-node PoC, multiple pods can still
-# mount the volume because they all land on the same node.
-# Sized for ~10 small AWQ models (~3GB each) + overhead.
-#
-# Why this PVC lives in the ai-models chart, NOT serving-runtimes:
-# microk8s-hostpath uses `volumeBindingMode: WaitForFirstConsumer`. The PVC
-# stays Pending until a pod requests it. If this PVC were installed before any
-# model pods exist (e.g. with the serving runtimes), `helm upgrade --wait`
-# would block until its 15-min timeout. Keeping it in the ai-models chart
-# means the PVC and the first vLLM/llama.cpp pod that consumes it land in
-# the same release — KServe schedules a pod, hostpath binds, helm returns.
-#
-# IMPORTANT: For multi-node or HA setups, your CSI driver must support
-# ReadWriteMany. Options: NFS provisioner, Longhorn RWX, Rook/Ceph CephFS.
-# If your storage class is RWO only, keep the current accessMode and accept
-# all pods landing on the same node (matches this single-node PoC).
+# Lives in this chart (not serving-runtimes) because microk8s-hostpath uses
+# WaitForFirstConsumer — keeping the PVC with the first consuming pod avoids a
+# `helm --wait` deadlock.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: model-cache-pvc
-  namespace: inference
+  name: {{ .Values.modelCache.name }}
+  namespace: {{ .Values.namespace }}
 spec:
   accessModes:
-    - ReadWriteOnce
+    - {{ .Values.modelCache.accessMode }}
   resources:
     requests:
-      storage: 50Gi
-  storageClassName: microk8s-hostpath
+      storage: {{ .Values.modelCache.size }}
+  storageClassName: {{ .Values.modelCache.storageClass }}

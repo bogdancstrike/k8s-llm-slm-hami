@@ -1,35 +1,23 @@
 ---
 # Qwen2.5 0.5B AWQ — second public GPU model exposed as the local "quality" slot.
-#
-# vRAM budget:
-#   Weights (AWQ INT4):       ~1.8 GB
-#   KV cache (max_len=2048):  ~1.0 GB
-#   Activations + CUDA ctx:   ~1.8 GB
-#   ─────────────────────────────────
-#   Total:                    ~4.6 GB  → fits in 5GB HAMi slice (tight)
-#
-# Not gated — no HuggingFace token required. Public model.
+# Ships without a tokenizer chat template — the vLLM runtime falls back to ChatML.
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
   name: smollm3-3b
-  namespace: inference
+  namespace: {{ .Values.namespace }}
 spec:
-  # Backend selection — GPU inference via vLLM
   backend: vllm
-
   model: "Qwen/Qwen2.5-0.5B-Instruct-AWQ"
   servedName: "qwen25-0.5b-awq"
 
+  gpuCards: 1
   gpuMemMb: 5000
   gpuMemPercentage: 30
   gpuCorePercent: 35
 
   quantization: "awq"
   maxModelLen: 1024
-  # 0.5B AWQ weights are tiny (~600 MiB), but the CUDA context + activations
-  # eat into the 5 GB slice. 0.85 gives KV cache enough budget to fit
-  # max_model_len=1024 (the engine bails out at 0.65 with KV cache=384 tokens).
   gpuMemUtilization: "0.85"
 
   cpuRequest: "1"
@@ -41,3 +29,7 @@ spec:
   maxReplicas: 1
 
   litellmAlias: "smollm3-3b-quality"
+{{- include "ai-models.registerJob" (dict
+      "name" "smollm3-3b" "alias" "smollm3-3b-quality" "served" "qwen25-0.5b-awq"
+      "backend" "vllm" "desc" "Qwen/Qwen2.5-0.5B-Instruct-AWQ via KServe + vLLM GPU"
+      "root" $) }}

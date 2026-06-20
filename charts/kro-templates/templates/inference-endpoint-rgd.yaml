@@ -104,7 +104,6 @@ spec:
     # Status — surfaces underlying resource state on the InferenceEndpoint CR
     status:
       endpointUrl: ${kserveInferenceService.status.url}
-      registeredInLiteLLM: ${litellmRegisterJob.status.succeeded}
 
   # ───────────────────────────────────────────────────────────────────────
   # Resources — KRO generates these for every InferenceEndpoint CR
@@ -125,7 +124,7 @@ spec:
             serving.kserve.io/deploymentMode: "RawDeployment"
             serving.kserve.io/autoscalerClass: "hpa"
             # Mark backend in annotations for observability (Grafana labels, etc.)
-            qsint.ai-platform/backend: ${schema.spec.backend}
+            ai-platform/backend: ${schema.spec.backend}
         spec:
           predictor:
             minReplicas: ${schema.spec.minReplicas}
@@ -192,94 +191,3 @@ spec:
                   nvidia.com/gpu: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCards) : "0"}'
                   nvidia.com/gpumem-percentage: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuMemPercentage) : "0"}'
                   nvidia.com/gpucores: '${schema.spec.backend == "vllm" ? string(schema.spec.gpuCorePercent) : "0"}'
-
-    # ─── LiteLLM registration Job ────────────────────────────────────────
-    # Works identically for both backends — both expose OpenAI-compatible APIs.
-    # The Job waits for the predictor endpoint to respond on /v1/models, then
-    # POSTs to LiteLLM /model/new.
-    - id: litellmRegisterJob
-      template:
-        apiVersion: batch/v1
-        kind: Job
-        metadata:
-          name: ${schema.metadata.name}-litellm-register
-          namespace: ${schema.metadata.namespace}
-          annotations:
-            kro.run/recreate-on-update: "true"
-        spec:
-          backoffLimit: 10
-          ttlSecondsAfterFinished: 3600
-          template:
-            spec:
-              restartPolicy: OnFailure
-              containers:
-                - name: register
-                  image: curlimages/curl:8.10.1
-                  env:
-                    # KRO interpolates these at apply time
-                    - name: MODEL_URL
-                      value: "http://${schema.metadata.name}-predictor.${schema.metadata.namespace}.svc.cluster.local"
-                    - name: LITELLM_URL
-                      value: "http://litellm.ai-platform.svc.cluster.local:4000"
-                    - name: LITELLM_ALIAS
-                      value: ${schema.spec.litellmAlias}
-                    - name: SERVED_NAME
-                      value: ${schema.spec.servedName}
-                    - name: MODEL_ID_TAG
-                      value: ${schema.metadata.name}
-                    - name: BACKEND
-                      value: ${schema.spec.backend}
-                    # Description shows the source (HF model ID for vLLM, GGUF file for llama.cpp)
-                    - name: MODEL_DESC
-                      value: "${schema.spec.backend == 'vllm' ? schema.spec.model : schema.spec.modelFile}"
-                    - name: LITELLM_MASTER_KEY
-                      valueFrom:
-                        secretKeyRef:
-                          name: litellm-secrets
-                          key: LITELLM_MASTER_KEY
-                  command:
-                    - sh
-                    - -c
-                    - |
-                      set -eu
-
-                      echo "Waiting for $MODEL_URL/v1/models to become reachable..."
-                      i=0
-                      while [ $i -lt 120 ]; do
-                        if curl -sf -o /dev/null "$MODEL_URL/v1/models"; then
-                          echo "Model endpoint ready after $i attempts"
-                          break
-                        fi
-                        i=$((i+1))
-                        sleep 10
-                      done
-
-                      if [ $i -eq 120 ]; then
-                        echo "ERROR: Model endpoint never became ready"
-                        exit 1
-                      fi
-
-                      echo "Registering model with LiteLLM proxy..."
-                      PAYLOAD=$(cat <<JSON
-                      {
-                        "model_name": "$LITELLM_ALIAS",
-                        "litellm_params": {
-                          "model": "openai/$SERVED_NAME",
-                          "api_base": "$MODEL_URL/v1",
-                          "api_key": "dummy-not-required-for-self-hosted"
-                        },
-                        "model_info": {
-                          "id": "$MODEL_ID_TAG",
-                          "description": "$MODEL_DESC via KServe + $BACKEND ($(if [ "$BACKEND" = "vllm" ]; then echo "GPU"; else echo "CPU"; fi))"
-                        }
-                      }
-                      JSON
-                      )
-
-                      curl -sf -X POST "$LITELLM_URL/model/new" \
-                        -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                        -H "Content-Type: application/json" \
-                        -d "$PAYLOAD"
-
-                      echo ""
-                      echo "Model registered successfully ($BACKEND backend)."

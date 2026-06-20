@@ -1,0 +1,6 @@
+apiVersion: v2
+name: namespaces
+description: Namespaces owned by the local AI platform deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

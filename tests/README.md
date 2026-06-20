@@ -1,6 +1,6 @@
 # tests/
 
-End-to-end **and integration** tests for the QSINT AI Platform. The suite
+End-to-end **and integration** tests for the AI Platform. The suite
 exercises *every component* — control plane, gateway, each deployed model, and
 all four UIs — using only the Python 3 standard library (no `pip install`).
 
@@ -19,13 +19,13 @@ The suite runs in two tiers.
 | `grafana/health` | Grafana `/api/health` reports `database: ok` |
 | `jaeger/ui` | Jaeger UI is up and `/api/services` responds |
 | `langfuse/health` | Langfuse `/api/public/health` returns 200 (app + DB up) |
-| `integration/trace-pipeline` | After driving traffic, a `litellm-proxy` trace actually lands in Jaeger — proves LiteLLM → OTLP → Collector → Jaeger |
+| `integration/trace-pipeline` | After driving GPU traffic, a `vllm-inference` trace actually lands in Jaeger — proves OTLP → Collector → Jaeger |
 
 ### Cluster / integration tier (needs `kubectl`; auto-skips otherwise)
 
 | Check | Asserts |
 |---|---|
-| `cluster/ready[<name>]` | `postgres`, `litellm`, `langfuse`, `open-webui`, `jaeger`, `otel-collector` are Ready |
+| `cluster/ready[<name>]` | `postgresql`, `litellm`, `langfuse-web`, `open-webui`, `jaeger`, `otel-collector` are Ready |
 | `cluster/serving-runtimes` | `vllm-runtime` + `llamacpp-runtime` ClusterServingRuntimes exist |
 | `cluster/isvc-ready[<model>]` | Each model's KServe InferenceService is `Ready` |
 | `cluster/register-job[<model>]` | Each `<model>-litellm-register` Job Succeeded |
@@ -90,5 +90,5 @@ microk8s kubectl -n ai-platform get secret litellm-secrets \
   (`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`), so ingestion isn't asserted
   end-to-end by default.
 - **CPU (llama.cpp) traces** stop at the LiteLLM→pod boundary (llama.cpp emits
-  no OTLP yet), so `integration/trace-pipeline` checks the `litellm-proxy`
-  service, which is always present.
+  no OTLP yet). vLLM emits OTLP on every GPU request, so
+  `integration/trace-pipeline` looks for the `vllm-inference` service in Jaeger.

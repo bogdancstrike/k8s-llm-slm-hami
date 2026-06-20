@@ -1,65 +1,34 @@
 ---
-# Qwen2.5-3B-Instruct — CPU inference via llama.cpp.
-#
-# Why CPU?
-#  - No GPU resources consumed — runs alongside GPU workloads without contention
-#  - Cheaper at low traffic (no GPU rent / power cost)
-#  - Fallback option when GPU pods are saturated or down
-#  - Suitable for: background async jobs, dev/staging, low-traffic services
-#
-# Performance expectations on a modern Xeon/EPYC with AVX-512:
-#   - Throughput: 15-30 tokens/sec generation
-#   - TTFT: 100-300ms (prompt-dependent)
-#   - RAM: ~3GB resident
-#   - Cold-start: ~30-60s first time (GGUF download from HuggingFace)
-#                 ~5-10s subsequent (mmap load from PVC cache)
-#
-# Model details:
-#   Qwen/Qwen2.5-3B-Instruct-GGUF q4_k_m quantization
-#   ~1.9GB on disk, multilingual including Romanian
-#
-# Resource sizing logic:
-#   weights:    1.9 GB
-#   KV cache:   ~500 MB (ctx 2048, 3B model)
-#   buffers:    ~600 MB
-#   total RAM:  ~3 GB resident
-#   request:    4 GB (safety margin)
-#   limit:      8 GB (allow burst for larger context if scaled up later)
+# Qwen2.5-3B-Instruct — CPU inference via llama.cpp (GGUF, no GPU requested).
+# Runs alongside the GPU models without contending for vRAM.
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
   name: qwen25-3b-cpu
-  namespace: inference
+  namespace: {{ .Values.namespace }}
 spec:
-  # Backend selection — CPU-only inference via llama.cpp server
   backend: llamacpp
 
-  # Filename in the model cache PVC. llama.cpp uses --model /models/$MODEL_FILE.
+  # GGUF filename in the model-cache PVC, and where to fetch it on first boot.
   modelFile: "qwen2.5-3b-instruct-q4_k_m.gguf"
-
-  # Direct HuggingFace download URL — wget pulls this on first cold start
-  # if the file is not already in /models cache.
   modelUrl: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
-
-  # Internal name used by llama.cpp --alias (shows in /v1/models response)
   servedName: "qwen25-3b-cpu"
 
   # llama.cpp tuning
-  ctxSize: 2048        # Context window — KV cache grows with this
-  threads: 6           # PHYSICAL CPU cores (not hyperthreads).
-                       # Adjust based on node CPU count: 4-8 is sweet spot.
-  batchSize: 512       # Tokens batched for prompt processing
+  ctxSize: 2048
+  threads: 6           # physical cores (4–8 sweet spot)
+  batchSize: 512
 
-  # Pod sizing — no GPU, only CPU + memory
-  cpuRequest: "4"      # Reserve 4 cores
-  cpuLimit: "8"        # Allow burst to 8 cores during prefill
+  cpuRequest: "4"
+  cpuLimit: "8"
   memoryRequest: "4Gi"
   memoryLimit: "8Gi"
 
-  # No autoscaling on this PoC. For prod: HPA on CPU utilization or
-  # custom metric (request queue depth via llama.cpp /metrics).
   minReplicas: 1
   maxReplicas: 1
 
-  # Alias shown in Open WebUI dropdown
   litellmAlias: "qwen-3b-cpu"
+{{- include "ai-models.registerJob" (dict
+      "name" "qwen25-3b-cpu" "alias" "qwen-3b-cpu" "served" "qwen25-3b-cpu"
+      "backend" "llamacpp" "desc" "Qwen2.5-3B-Instruct GGUF via KServe + llama.cpp CPU"
+      "root" $) }}

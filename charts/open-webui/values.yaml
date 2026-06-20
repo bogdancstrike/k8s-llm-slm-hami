@@ -27,6 +27,10 @@ open-webui:
 
   # Extra environment for the container.
   extraEnvVars:
+    # Use shared PostgreSQL instead of the default SQLite — avoids the v0.9.6
+    # SQLite migration bug (NOT NULL constraint failed: chat.old_chat).
+    - name: DATABASE_URL
+      value: "postgresql://platform:ChangeMe-PoC-Only-2026@postgresql.ai-platform.svc.cluster.local:5432/open_webui"
     - name: WEBUI_SECRET_KEY
       value: "open-webui-session-secret-change-me-32"
     - name: WEBUI_AUTH

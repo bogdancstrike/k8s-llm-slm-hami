@@ -1,4 +1,4 @@
-# Architecture — QSINT AI Platform (On-prem PoC)
+# Architecture — AI Platform (On-prem PoC)
 
 > Companion docs: [documentation.md](documentation.md) (install & operations) ·
 > [deploy_new_models.md](deploy_new_models.md) (adding models) ·
@@ -68,7 +68,7 @@ Model appears in Open WebUI                  ← user access
 1. **Validate the stack.** Prove KRO + KServe + HAMi + LiteLLM + Open WebUI +
    Langfuse + Jaeger compose into a coherent on-prem platform on commodity
    hardware.
-2. **De-risk QSINT production.** Every choice here (KServe vs Ray, HAMi vs MIG,
+2. **De-risk the production platform.** Every choice here (KServe vs Ray, HAMi vs MIG,
    single gateway vs direct routing) must hold up later on L40S/H200 hardware.
    Being wrong now — on hardware that costs nothing per hour — is cheap.
 3. **Self-service developer experience.** Once up, the team adds models with a
@@ -143,7 +143,7 @@ swaps to Jaeger Production with Elasticsearch, or Grafana Tempo.
 
 ### 2.8 Helm + a single bootstrap script
 
-The PoC is installed by `scripts/deploy-microk8s.sh`, a deliberate chain of
+The PoC is installed by `scripts/deploy.sh`, a deliberate chain of
 `helm upgrade --install` commands. It is idempotent: re-running it is the
 supported upgrade and reconciliation path for every bundled chart. Each app is
 its own Helm release (see [§7](#7-chart--release-topology)).
@@ -278,27 +278,28 @@ spec:
 ```
 
 The `inference-endpoint` RGD
-(`charts/qsint-kro-templates/templates/inference-endpoint-rgd.yaml`) expands it
+(`charts/kro-templates/templates/inference-endpoint-rgd.yaml`) expands it
 into two KRO-managed children plus a KServe-derived chain:
 
 ```text
-InferenceEndpoint (KRO)
-   │
-   ├─ KServe InferenceService           ← rendered by KRO
-   │     ├─ Deployment                  ← rendered by KServe
-   │     │    └─ Pod (schedulerName: hami-scheduler)
-   │     │         └─ container: vllm/vllm-openai:v0.6.3
-   │     ├─ Service (ClusterIP :80 → :8000)
-   │     └─ HPA (min=1, max=1)
-   │
-   └─ Job: <name>-litellm-register      ← rendered by KRO
-         ├─ wait for /v1/models on the pod
-         └─ POST /model/new on LiteLLM
+InferenceEndpoint (KRO)                  ← from charts/ai-models/templates/<model>.yaml
+   └─ KServe InferenceService            ← rendered by KRO (RGD)
+         ├─ Deployment                   ← rendered by KServe
+         │    └─ Pod (schedulerName: hami-scheduler)
+         │         └─ container: vllm/vllm-openai:v0.6.3
+         ├─ Service (ClusterIP :80 → :8000)
+         └─ HPA (min=1, max=1)
+
+Job: <name>-litellm-register             ← shipped alongside the model file
+   ├─ wait for /v1/models on the pod        (ai-models registerJob helper)
+   └─ POST /model/new on LiteLLM
 ```
 
-The Job is gated on `/v1/models` returning 200 from the new pod, so it never
-races KServe readiness. KRO aggregates child status back onto the
-`InferenceEndpoint` (`status.endpointUrl`, `status.registeredInLiteLLM`).
+KRO expands the `InferenceEndpoint` into the KServe `InferenceService` (which
+deploys the model) and aggregates its status (`status.endpointUrl`). Each model
+file also ships a self-contained `<name>-litellm-register` Job (via the
+`ai-models.registerJob` helper) that waits for `/v1/models` on the new pod, then
+POSTs it to LiteLLM — so it never races KServe readiness.
 
 **Multi-backend dispatch.** The RGD is unified — `spec.backend` drives CEL
 ternaries that select the model format and runtime:
@@ -578,7 +579,7 @@ sidecar from ConfigMaps labelled `grafana_dashboard: "1"` in `observability`.
 - **HAMi GPU Split — Native Metrics** — per-pod vRAM/compute, host & scheduler
   views, using real HAMi series (`vGPU_device_memory_*`, `HostCoreUtilization`,
   `vGPUMemoryAllocated`, `GPUDeviceCoreAllocated`).
-- **QSINT — vLLM Inference** — active/queued requests, TTFT & TPOT percentiles,
+- **AI Platform — vLLM Inference** — active/queued requests, TTFT & TPOT percentiles,
   KV-cache utilisation, token throughput.
 - KServe ModelServer / TorchServe / Triton / Knative dashboards are bundled but
   empty until a matching runtime is deployed.
@@ -610,13 +611,13 @@ Every app is its own Helm chart and its own release — there is no monolithic
 
 | Chart | Release ns | Purpose |
 |---|---|---|
-| `qsint-cert-manager` | `cert-manager` | cert-manager (wrapper) |
-| `qsint-observability-stack` | `observability` | kube-prometheus-stack (wrapper) |
-| `qsint-hami` | `kube-system` | HAMi vGPU (wrapper) |
-| `qsint-kro` | `kro-system` | KRO controller (wrapper) |
-| `qsint-kserve-crd` | `kserve` | KServe CRDs |
-| `qsint-kserve` | `kserve` | KServe controller |
-| `qsint-namespaces` | `default` | `ai-platform`, `inference` namespaces |
+| `cert-manager` | `cert-manager` | cert-manager (wrapper) |
+| `observability-stack` | `observability` | kube-prometheus-stack (wrapper) |
+| `hami` | `kube-system` | HAMi vGPU (wrapper) |
+| `kro` | `kro-system` | KRO controller (wrapper) |
+| `kserve-crd` | `kserve` | KServe CRDs |
+| `kserve` | `kserve` | KServe controller |
+| `namespaces` | `default` | `ai-platform`, `inference` namespaces |
 | `postgresql` | `ai-platform` | Shared LiteLLM + Langfuse DB |
 | `litellm` | `ai-platform` | Gateway + ingress + secret mirror |
 | `langfuse` | `ai-platform` | Tracing UI + ingress |
@@ -625,14 +626,14 @@ Every app is its own Helm chart and its own release — there is no monolithic
 | `open-webui` | `ai-platform` | Chat UI + ingress |
 | `serving-runtimes` | `inference` | vLLM + llama.cpp runtimes, HF secret, chat templates, vLLM PodMonitor |
 | `monitoring` | `observability` | Grafana dashboards + HAMi ServiceMonitors |
-| `qsint-kro-templates` | `kro-system` | The `InferenceEndpoint` RGD |
+| `kro-templates` | `kro-system` | The `InferenceEndpoint` RGD |
 | `ai-models` | `inference` | Example `InferenceEndpoint`s + model-cache PVC + register Jobs |
 
 **Ordering rationale.** Prometheus CRDs (ServiceMonitor/PodMonitor) come from
 the observability stack, so it installs before anything that defines monitors.
 PostgreSQL installs before LiteLLM/Langfuse (they block on it via init
 containers). KServe CRDs precede `serving-runtimes` (ClusterServingRuntime). The
-`InferenceEndpoint` CRD (from `qsint-kro-templates`) must be `Established` before
+`InferenceEndpoint` CRD (from `kro-templates`) must be `Established` before
 `ai-models`. The model-cache PVC lives in `ai-models` (not `serving-runtimes`)
 because `microk8s-hostpath` uses `WaitForFirstConsumer` — keeping the PVC with
 the first consuming pod avoids a `helm --wait` deadlock.

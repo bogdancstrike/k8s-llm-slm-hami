@@ -1,1 +1,32 @@
-{}
+# Jaeger all-in-one (in-memory) — fully configurable.
+namespace: ai-platform
+replicaCount: 1
+
+image:
+  repository: jaegertracing/all-in-one
+  tag: "1.62.0"
+  pullPolicy: IfNotPresent
+
+# Max spans kept in the in-memory backend.
+maxTraces: 50000
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: true
+  className: public
+  host: jaeger.local.ro
+
+serviceMonitor:
+  enabled: true
+  releaseLabel: kube-prom-stack
+  interval: 30s
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi

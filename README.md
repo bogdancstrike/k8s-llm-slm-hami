@@ -1,4 +1,4 @@
-# QSINT AI Platform — On-prem PoC
+# AI Platform — On-prem PoC
 
 > **Version:** 2.1
 > **Last updated:** 2026-06-19
@@ -13,7 +13,7 @@ hardware most people already have on their desk.
 |---|---|
 | Target cluster | MicroK8s, single node, `gpu=on` label |
 | GPU | NVIDIA RTX 3080 10 GB, vGPU partitioned by HAMi |
-| Install model | Helm charts in `charts/` (one per app), applied by `scripts/deploy-microk8s.sh` |
+| Install model | Helm charts in `charts/` (one per app), applied by `scripts/deploy.sh` |
 | Inference runtimes | KServe `ClusterServingRuntime` — vLLM (GPU) + llama.cpp (CPU) |
 | Model abstraction | KRO `InferenceEndpoint` CRD (one YAML per model) |
 | Gateway | LiteLLM (OpenAI-compatible) |
@@ -96,10 +96,10 @@ Add your own: [docs/deploy_new_models.md](docs/deploy_new_models.md).
 sudo ./scripts/update-local-hosts.sh
 
 # 2. Install the whole stack (idempotent — re-run = upgrade)
-./scripts/deploy-microk8s.sh
+./scripts/deploy.sh
 
 # 3. (Optional) load a Hugging Face token for gated models
-HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy-microk8s.sh
+HUGGINGFACE_TOKEN=hf_xxx ./scripts/deploy.sh
 ```
 
 First install takes 15–30 min (image pulls + first model weights). The script
@@ -149,15 +149,15 @@ in-cluster readiness. See [tests/README.md](tests/README.md).
 ├── README.md                         this overview
 ├── docs/                             architecture, deploy_new_models, documentation
 ├── charts/                           Helm charts — source of truth (one per app)
-│   ├── qsint-namespaces/  qsint-cert-manager/  qsint-observability-stack/
-│   ├── qsint-hami/  qsint-kro/  qsint-kserve-crd/  qsint-kserve/
-│   ├── qsint-kro-templates/          the InferenceEndpoint RGD
+│   ├── namespaces/  cert-manager/  observability-stack/
+│   ├── hami/  kro/  kserve-crd/  kserve/
+│   ├── kro-templates/          the InferenceEndpoint RGD
 │   ├── postgresql/  litellm/  langfuse/  open-webui/  jaeger/  otel-collector/
 │   ├── serving-runtimes/             vLLM + llama.cpp ClusterServingRuntimes
 │   ├── monitoring/                   Grafana dashboards + HAMi ServiceMonitors
 │   └── ai-models/                    example InferenceEndpoints + register Jobs
 ├── scripts/
-│   ├── deploy-microk8s.sh            one-shot installer / upgrader
+│   ├── deploy.sh            one-shot installer / upgrader
 │   └── update-local-hosts.sh         maps *.local.ro hostnames to 127.0.0.1
 └── tests/                            stdlib-only e2e/integration suite
 ```

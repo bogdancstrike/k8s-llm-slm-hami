@@ -302,7 +302,7 @@
   "refresh": "10s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["qsint", "vllm", "inference"],
+  "tags": ["ai-platform", "vllm", "inference"],
   "templating": {
     "list": [
       {
@@ -317,7 +317,7 @@
     ]
   },
   "time": { "from": "now-30m", "to": "now" },
-  "title": "QSINT — vLLM Inference",
-  "uid": "qsint-vllm-inference",
+  "title": "AI Platform — vLLM Inference",
+  "uid": "ai-platform-vllm-inference",
   "version": 1
 }

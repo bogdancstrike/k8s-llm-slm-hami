@@ -43,3 +43,7 @@ postgresql:
   # No read replicas on a single-node PoC.
   readReplicas:
     replicaCount: 0
+
+  # Single-node PoC with no other NetworkPolicies — don't fence off Postgres.
+  networkPolicy:
+    enabled: false

@@ -1,77 +1,48 @@
 ---
 # LiteLLM proxy — unified OpenAI-compatible gateway across all models.
-#
-# Architecture:
-# - Reads model list from PostgreSQL (managed via /model/new API at runtime)
-# - Forwards requests to model pods via internal K8s DNS:
-#     gemma-1b.inference.svc.cluster.local:80
-#     smollm3-3b.inference.svc.cluster.local:80
-# - Logs all traffic to Langfuse via callback (LANGFUSE_PUBLIC_KEY env)
-#
-# IMPORTANT: The initial config.yaml below registers ZERO models. KRO Template's
-# litellmregister Job adds them dynamically via POST /model/new when each
-# InferenceEndpoint is reconciled. This matches the AWS slide pattern exactly.
-
+# Reads its model list from PostgreSQL (managed via /model/new at runtime);
+# the KRO register Jobs add models dynamically. Logs to Langfuse + OTLP.
 apiVersion: v1
 kind: Secret
 metadata:
   name: litellm-secrets
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
 type: Opaque
 stringData:
-  # Master key for LiteLLM admin API (used by KRO Job to register models)
-  LITELLM_MASTER_KEY: "sk-litellm-master-change-me"
-  # Salt for encrypting credentials in DB
-  LITELLM_SALT_KEY: "salt-change-me-32-chars-minimum-x"
-  # Database URL — assembled from postgres-credentials
-  DATABASE_URL: "postgresql://platform:ChangeMe-PoC-Only-2026@postgres.ai-platform.svc.cluster.local:5432/litellm"
-  # Langfuse keys — filled in after Langfuse is initialized (see deployment guide)
-  LANGFUSE_PUBLIC_KEY: ""
-  LANGFUSE_SECRET_KEY: ""
-  LANGFUSE_HOST: "http://langfuse.ai-platform.svc.cluster.local:3000"
+  LITELLM_MASTER_KEY: {{ .Values.masterKey | quote }}
+  LITELLM_SALT_KEY: {{ .Values.saltKey | quote }}
+  DATABASE_URL: {{ include "litellm.databaseUrl" . | quote }}
+  LANGFUSE_PUBLIC_KEY: {{ .Values.langfuse.publicKey | quote }}
+  LANGFUSE_SECRET_KEY: {{ .Values.langfuse.secretKey | quote }}
+  LANGFUSE_HOST: {{ .Values.langfuse.host | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: litellm-config
-  namespace: ai-platform
+  namespace: {{ .Values.namespace }}
 data:
   config.yaml: |
-    # LiteLLM initial config — empty model list.
-    # Models are added at runtime by KRO's litellmregister Job (POST /model/new).
-    # See KRO Template in kro-templates/ for the exact flow.
+    # Initial config — empty model list; models added at runtime by the KRO
+    # register Jobs (POST /model/new).
     model_list: []
 
     litellm_settings:
-      # Telemetry off — privacy
       telemetry: false
-      # Log all completions to Langfuse + emit OTLP traces to collector.
-      #
-      # NOTE: the `prometheus` callback is LiteLLM Enterprise-only — adding it
-      # here makes the pod refuse to start without a LITELLM_LICENSE. Gateway
-      # request rates / latencies are therefore not scraped into Prometheus in
-      # this PoC; the QSINT LiteLLM dashboard is intentionally absent.
-      # Per-model metrics still come from vLLM's own /metrics, and per-request
-      # traces flow through OTLP → Jaeger.
       success_callback:
         - langfuse
         - otel
       failure_callback:
         - langfuse
         - otel
-      # Retry transient errors before bubbling up
       num_retries: 2
       request_timeout: 600
-      # Drop unsupported params silently instead of erroring
       drop_params: true
 
     general_settings:
-      # Persist model list in PostgreSQL so registrations survive pod restarts
       store_model_in_db: true
-      # Master key required for /model/new and admin endpoints
       master_key: os.environ/LITELLM_MASTER_KEY
       database_url: os.environ/DATABASE_URL
-      # Default team for auto-registered models
       default_team_settings:
         - team_id: default
           max_budget: 100.0
@@ -79,70 +50,66 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: litellm
-  namespace: ai-platform
+  name: {{ include "litellm.name" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: litellm
+      app: {{ include "litellm.name" . }}
   template:
     metadata:
       labels:
-        app: litellm
+        {{- include "litellm.labels" . | nindent 8 }}
     spec:
       initContainers:
         - name: wait-for-postgres
-          image: postgres:16-alpine
+          image: {{ .Values.waitImage }}
           command:
             - sh
             - -c
             - |
-              until pg_isready -h postgres.ai-platform.svc.cluster.local -U platform; do
+              until pg_isready -h {{ .Values.database.host }} -U {{ .Values.database.user }}; do
                 echo "Waiting for postgres..."
                 sleep 3
               done
       containers:
-        - name: litellm
-          image: ghcr.io/berriai/litellm:main-v1.52.0-stable
-          imagePullPolicy: IfNotPresent
+        - name: {{ include "litellm.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "--config=/etc/litellm/config.yaml"
-            - "--port=4000"
+            - "--port={{ .Values.service.port }}"
             - "--num_workers=4"
           ports:
-            - containerPort: 4000
+            - containerPort: {{ .Values.service.port }}
               name: http
           envFrom:
             - secretRef:
                 name: litellm-secrets
           env:
             - name: PORT
-              value: "4000"
+              value: {{ .Values.service.port | quote }}
             - name: STORE_MODEL_IN_DB
               value: "True"
-            # Print stack traces on errors (helpful for PoC)
             - name: LITELLM_LOG
               value: INFO
-            # ─── OpenTelemetry configuration ──────────────────────────────
-            # LiteLLM uses these env vars when 'otel' is in success_callback
             - name: OTEL_EXPORTER
               value: "otlp_grpc"
             - name: OTEL_ENDPOINT
-              value: "http://otel-collector.ai-platform.svc.cluster.local:4317"
-            # Standard OTel SDK env vars (also picked up by underlying libraries)
+              value: {{ .Values.otelEndpoint | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector.ai-platform.svc.cluster.local:4317"
+              value: {{ .Values.otelEndpoint | quote }}
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
               value: "grpc"
             - name: OTEL_SERVICE_NAME
               value: "litellm-proxy"
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "service.namespace=ai-platform,service.version=1.52.0,deployment.environment=poc"
-            # Sample 100% for PoC. For prod, use parentbased_traceidratio
+              value: "service.namespace={{ .Values.namespace }},deployment.environment=poc"
             - name: OTEL_TRACES_SAMPLER
               value: "always_on"
-            # Inject pod/node info into spans
             - name: K8S_POD_NAME
               valueFrom:
                 fieldRef:
@@ -155,24 +122,31 @@ spec:
             - name: config
               mountPath: /etc/litellm
           resources:
-            requests:
-              cpu: 200m
-              memory: 512Mi
-            limits:
-              cpu: 2
-              memory: 2Gi
+            {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /health/readiness
-              port: 4000
+              port: {{ .Values.service.port }}
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health/liveness
-              port: 4000
+              port: {{ .Values.service.port }}
             initialDelaySeconds: 30
             periodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
@@ -181,32 +155,33 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: litellm
-  namespace: ai-platform
+  name: {{ include "litellm.name" . }}
+  namespace: {{ .Values.namespace }}
   labels:
-    app: litellm
+    {{- include "litellm.labels" . | nindent 4 }}
 spec:
+  type: {{ .Values.service.type }}
   selector:
-    app: litellm
+    app: {{ include "litellm.name" . }}
   ports:
     - name: http
-      port: 4000
-      targetPort: 4000
-  type: ClusterIP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+{{- if .Values.serviceMonitor.enabled }}
 ---
-# ServiceMonitor for LiteLLM Prometheus metrics
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: litellm
-  namespace: ai-platform
+  name: {{ include "litellm.name" . }}
+  namespace: {{ .Values.namespace }}
   labels:
-    release: kube-prom-stack
+    release: {{ .Values.serviceMonitor.releaseLabel }}
 spec:
   selector:
     matchLabels:
-      app: litellm
+      app: {{ include "litellm.name" . }}
   endpoints:
     - port: http
       path: /metrics
-      interval: 30s
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

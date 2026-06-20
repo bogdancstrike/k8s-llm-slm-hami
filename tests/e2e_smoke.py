@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end + integration test suite for the QSINT AI Platform.
+"""End-to-end + integration test suite for the AI Platform.
 
 Exercises **every component** of the platform, in two tiers:
 
@@ -66,12 +66,14 @@ TIMEOUT = int(os.environ.get("TIMEOUT", "120"))
 # actually registered in LiteLLM, but these must all be present.
 EXPECTED_ALIASES = ["gemma-1b-fast", "smollm3-3b-quality", "qwen-3b-cpu"]
 
-# Platform workloads expected Ready (namespace, kind, name).
+# Platform workloads expected Ready (namespace, kind, name). Reflects the
+# vendored upstream charts: bitnami postgres (statefulset `postgresql`),
+# langfuse v3 (`langfuse-web`), Open WebUI upstream (statefulset).
 PLATFORM_WORKLOADS = [
-    ("ai-platform", "statefulset", "postgres"),
+    ("ai-platform", "statefulset", "postgresql"),
     ("ai-platform", "deployment", "litellm"),
-    ("ai-platform", "deployment", "langfuse"),
-    ("ai-platform", "deployment", "open-webui"),
+    ("ai-platform", "deployment", "langfuse-web"),
+    ("ai-platform", "statefulset", "open-webui"),
     ("ai-platform", "deployment", "jaeger"),
     ("ai-platform", "deployment", "otel-collector"),
 ]
@@ -255,6 +257,59 @@ def check_open_webui() -> str:
     raise AssertionError("open-webui not reachable on any URL/path")
 
 
+def check_open_webui_persistence() -> str:
+    """Sign up / sign in, then create a chat through Open WebUI's API.
+
+    Exercises the DB write path that failed under SQLite in v0.9.6
+    (`NOT NULL constraint failed: chat.old_chat`). With the Postgres backend
+    this should succeed, proving Open WebUI persistence works end-to-end.
+    """
+    base = OPEN_WEBUI_URL
+    creds = {"name": "e2e-tester", "email": "e2e@local.test", "password": "e2e-pass-12345"}
+
+    def _token():
+        # Try signin first (idempotent across runs); fall back to signup.
+        for path, payload in (
+            ("/api/v1/auths/signin", {"email": creds["email"], "password": creds["password"]}),
+            ("/api/v1/auths/signup", creds),
+        ):
+            status, body = _request(f"{base}{path}", method="POST",
+                                    data=json.dumps(payload).encode(),
+                                    headers={"Content-Type": "application/json"}, timeout=15)
+            if status == 200:
+                try:
+                    return json.loads(body).get("token")
+                except Exception:
+                    return None
+            if status == 404:
+                raise Skip(f"auth endpoint {path} not found (API changed) — skipping")
+        return None
+
+    token = _token()
+    assert token, "could not obtain an Open WebUI auth token (signin/signup failed)"
+
+    chat = {
+        "chat": {
+            "title": "e2e persistence check",
+            "models": [EXPECTED_ALIASES[0]],
+            "messages": [],
+            "history": {"messages": {}, "currentId": None},
+        }
+    }
+    status, body = _request(f"{base}/api/v1/chats/new", method="POST",
+                            data=json.dumps(chat).encode(),
+                            headers={"Content-Type": "application/json",
+                                     "Authorization": f"Bearer {token}"}, timeout=20)
+    text = body.decode("utf-8", errors="replace")
+    assert status == 200, f"chat create failed (HTTP {status}): {text[:300]}"
+    cid = ""
+    try:
+        cid = json.loads(text).get("id", "")
+    except Exception:
+        pass
+    return f"created chat {cid or '(ok)'} — Postgres persistence works"
+
+
 def check_grafana() -> str:
     data = get_json(f"{GRAFANA_URL}/api/health", timeout=10)
     db = data.get("database")
@@ -433,12 +488,12 @@ def write_junit(path: str, results: list[Result]) -> None:
     duration = sum(r.elapsed_s for r in results)
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        f'<testsuite name="qsint-e2e" tests="{total}" failures="{failures}" '
+        f'<testsuite name="ai-platform-e2e" tests="{total}" failures="{failures}" '
         f'skipped="{skipped}" time="{duration:.2f}">',
     ]
     for r in results:
         lines.append(
-            f'  <testcase classname="qsint.e2e" name="{xml_escape(r.name)}" '
+            f'  <testcase classname="ai-platform.e2e" name="{xml_escape(r.name)}" '
             f'time="{r.elapsed_s:.2f}">'
         )
         if r.status == FAIL:
@@ -490,6 +545,7 @@ def main() -> int:
         if alias:
             r.run(f"litellm/chat[{alias}]", lambda a=alias: chat_via_litellm(a))
     r.run("open-webui/health", check_open_webui)
+    r.run("open-webui/persistence", check_open_webui_persistence)
     r.run("grafana/health", check_grafana)
     r.run("jaeger/ui", check_jaeger_ui)
     r.run("langfuse/health", check_langfuse)

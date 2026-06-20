@@ -38,12 +38,18 @@ You add a model by dropping a new template into that chart and re-applying it
 
 ```text
 charts/ai-models/templates/
+├── _helpers.tpl                     the shared register-Job template
 ├── 00-model-cache-pvc.yaml          shared model cache (don't touch)
 ├── gemma-1b.yaml                    example GPU model (vLLM)
 ├── smollm3-3b.yaml                  example GPU model (vLLM)
-├── qwen25-3b-cpu.yaml               example CPU model (llama.cpp)
-└── litellm-registration-jobs.yaml   explicit register-jobs for the examples
+└── qwen25-3b-cpu.yaml               example CPU model (llama.cpp)
 ```
+
+Each model file is **self-contained**: it holds the `InferenceEndpoint` plus a
+one-line `{{ include "ai-models.registerJob" … }}` that renders the LiteLLM
+registration Job for that model (using the shared `litellmUrl` / `registerImage`
+/ `namespace` from `values.yaml`). To add a model you copy one file, edit it,
+and apply — nothing else to touch. Models are **not** listed in `values.yaml`.
 
 One `InferenceEndpoint` becomes a live, GPU-partitioned, OpenAI-compatible,
 chat-accessible model. You never write a Deployment, Service, HPA, or
@@ -76,7 +82,7 @@ KRO surfaces progress on the CR itself:
 
 ```bash
 microk8s kubectl -n inference get inferenceendpoint <name> \
-  -o jsonpath='{.status.endpointUrl} {.status.registeredInLiteLLM}{"\n"}'
+  -o jsonpath='{.status.endpointUrl}{"\n"}'
 ```
 
 Full internals are in
@@ -87,7 +93,7 @@ Full internals are in
 ## 3. Full field reference
 
 The schema is defined by the `inference-endpoint` RGD
-(`charts/qsint-kro-templates/templates/inference-endpoint-rgd.yaml`). All fields
+(`charts/kro-templates/templates/inference-endpoint-rgd.yaml`). All fields
 are optional except `litellmAlias`; defaults are applied by KRO.
 
 ### Common (both backends)
@@ -132,7 +138,9 @@ are optional except `litellmAlias`; defaults are applied by KRO.
 | Field | Source |
 |---|---|
 | `status.endpointUrl` | `kserveInferenceService.status.url` |
-| `status.registeredInLiteLLM` | `litellmRegisterJob.status.succeeded` |
+
+Registration status is the per-model `<name>-litellm-register` Job's completion
+(`kubectl -n inference get job <name>-litellm-register`), not a CR status field.
 
 ---
 
@@ -217,25 +225,25 @@ spec:
   minReplicas: 1
   maxReplicas: 1
   litellmAlias: "qwen25-7b-coder"
+# Self-contained: append the register-Job include so applying this one file
+# both deploys and registers the model. Shared bits come from values.yaml.
+{{- include "ai-models.registerJob" (dict
+      "name" "qwen25-7b" "alias" "qwen25-7b-coder" "served" "qwen25-7b"
+      "backend" "vllm" "desc" "Qwen2.5-7B-Instruct-AWQ via KServe + vLLM GPU"
+      "root" $) }}
 EOF
 
-# 2. (For the bundled example set) add it to the explicit registration list.
-#    Each InferenceEndpoint also auto-generates its own register Job via the
-#    KRO RGD, so this step is only needed to keep the curated example list
-#    in sync. Append a dict to the $models list:
-$EDITOR charts/ai-models/templates/litellm-registration-jobs.yaml
-
-# 3. Apply
-./scripts/deploy-microk8s.sh                 # full idempotent re-run
+# 2. Apply (no other file to edit)
+./scripts/deploy.sh                 # full idempotent re-run
 # or just the models chart:
 microk8s helm3 upgrade --install ai-models charts/ai-models -n inference
 
-# 4. Watch reconciliation
+# 3. Watch reconciliation
 microk8s kubectl -n inference get inferenceendpoint qwen25-7b -w
 microk8s kubectl -n inference get inferenceservices
 microk8s kubectl -n inference logs -f deploy/qwen25-7b-predictor
 
-# 5. Once Ready, the register Job POSTs to LiteLLM; the alias appears in
+# 4. Once Ready, the register Job POSTs to LiteLLM; the alias appears in
 #    /v1/models and Open WebUI automatically.
 ```
 

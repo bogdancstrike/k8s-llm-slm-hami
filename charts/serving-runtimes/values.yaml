@@ -1,1 +1,12 @@
-{}
+# KServe ClusterServingRuntimes — configurable images, namespace, and HF token.
+namespace: inference
+
+# Hugging Face token for gated models (placeholder; the deploy script can patch
+# it from $HUGGINGFACE_TOKEN, or set it here).
+huggingfaceToken: ""
+
+vllm:
+  image: vllm/vllm-openai:v0.6.3
+
+llamacpp:
+  image: ghcr.io/ggerganov/llama.cpp:server-b4404

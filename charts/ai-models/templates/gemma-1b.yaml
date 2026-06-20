@@ -1,51 +1,44 @@
 ---
 # TinyLlama 1.1B AWQ — small fast GPU model exposed as the local "gemma" slot.
 #
-# vRAM budget:
-#   Weights (AWQ INT4):       ~0.6 GB
-#   KV cache (max_len=2048):  ~0.5 GB
-#   Activations + CUDA ctx:   ~1.5 GB
-#   ─────────────────────────────────
-#   Total:                    ~2.6 GB  → fits in 5GB HAMi slice with headroom
+# Drop a file like this in templates/ and apply the chart (or `kubectl apply`
+# the rendered CR): KRO expands it into a KServe InferenceService (the model)
+# plus a LiteLLM registration Job (auto-registers the alias across the stack).
 #
-# Public model: no Hugging Face token is required for the default PoC.
+# Public model: no Hugging Face token is required.
 apiVersion: kro.run/v1alpha1
 kind: InferenceEndpoint
 metadata:
   name: gemma-1b
-  namespace: inference
+  namespace: {{ .Values.namespace }}
 spec:
-  # Backend selection — vllm runs on GPU via vLLM (HAMi vGPU partitioning)
+  # Backend — vllm runs on GPU (HAMi vGPU partitioning)
   backend: vllm
-
-  # HuggingFace model ID
   model: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ"
-
-  # Internal name used by vLLM's --served-model-name
   servedName: "gemma-1b"
 
   # GPU allocation via HAMi
-  # Number of GPU cards (vLLM tensor parallelism). 1 = single GPU.
-  # Set to 2+ on multi-GPU nodes to shard a larger model across cards.
+  # gpuCards = vLLM tensor-parallel size (1 = single GPU; 2+ shards across cards)
   gpuCards: 1
   gpuMemMb: 5000
   gpuMemPercentage: 30
   gpuCorePercent: 35
 
-  # Quantization — AWQ INT4 chosen for VRAM efficiency
   quantization: "awq"
   maxModelLen: 2048
   gpuMemUtilization: "0.85"
 
-  # Pod sizing
   cpuRequest: "1"
   cpuLimit: "2"
   memoryRequest: "4Gi"
   memoryLimit: "8Gi"
 
-  # Replicas
   minReplicas: 1
   maxReplicas: 1
 
-  # Alias shown in Open WebUI dropdown
+  # Alias shown in Open WebUI / LiteLLM
   litellmAlias: "gemma-1b-fast"
+{{- include "ai-models.registerJob" (dict
+      "name" "gemma-1b" "alias" "gemma-1b-fast" "served" "gemma-1b"
+      "backend" "vllm" "desc" "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ via KServe + vLLM GPU"
+      "root" $) }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kro-templates
+description: KRO ResourceGraphDefinitions for the AI platform.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

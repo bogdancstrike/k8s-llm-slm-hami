@@ -76,11 +76,24 @@ opentelemetry-collector:
       resource:
         attributes:
           - key: deployment.environment
-            value: poc
+            value: default
             action: upsert
           - key: service.platform
             value: ai-platform
             action: upsert
+      transform:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["input.value"], attributes["SpanAttributes.LLM_PROMPTS.1.content"]) where attributes["SpanAttributes.LLM_PROMPTS.1.content"] != nil
+              - set(attributes["input.value"], attributes["SpanAttributes.LLM_PROMPTS.0.content"]) where attributes["input.value"] == nil and attributes["SpanAttributes.LLM_PROMPTS.0.content"] != nil
+              - set(attributes["output.value"], attributes["SpanAttributes.LLM_COMPLETIONS.0.content"]) where attributes["SpanAttributes.LLM_COMPLETIONS.0.content"] != nil
+              - set(attributes["gen_ai.prompt"], attributes["input.value"]) where attributes["input.value"] != nil
+              - set(attributes["gen_ai.completion"], attributes["output.value"]) where attributes["output.value"] != nil
+              - set(attributes["langfuse.trace.name"], attributes["gen_ai.request.model"]) where attributes["gen_ai.request.model"] != nil
+              - set(attributes["langfuse.trace.input"], attributes["input.value"]) where attributes["input.value"] != nil
+              - set(attributes["langfuse.trace.output"], attributes["output.value"]) where attributes["output.value"] != nil
     exporters:
       otlp/jaeger:
         endpoint: jaeger-collector.ai-platform.svc.cluster.local:4317
@@ -106,7 +119,7 @@ opentelemetry-collector:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [memory_limiter, resource, batch]
+          processors: [memory_limiter, resource, transform, batch]
           exporters: [otlp/jaeger, debug, otlphttp/langfuse]
         metrics:
           receivers: [otlp, prometheus]

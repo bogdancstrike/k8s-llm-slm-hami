@@ -125,8 +125,7 @@ spec:
             --disable-log-requests \
             --otlp-traces-endpoint="$${OTEL_EXPORTER_OTLP_ENDPOINT}" \
             --collect-detailed-traces=all \
-            --enable-auto-tool-choice \
-            --tool-call-parser=hermes \
+            $${EXTRA_ARGS} \
             $CHAT_TEMPLATE_ARG
 
       ports:
@@ -163,6 +162,8 @@ spec:
           value: INFO
         - name: NCCL_DEBUG
           value: WARN
+        - name: EXTRA_ARGS
+          value: "--enable-auto-tool-choice --tool-call-parser=hermes"
         # ─── OpenTelemetry tracing config ─────────────────────────────────
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector.ai-platform.svc.cluster.local:4317"
@@ -173,7 +174,7 @@ spec:
         - name: OTEL_SERVICE_NAME
           value: "vllm-inference"
         - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "service.namespace=inference,deployment.environment=poc"
+          value: "service.namespace=inference,deployment.environment=default"
         - name: OTEL_TRACES_SAMPLER
           value: "always_on"
         - name: K8S_POD_NAME

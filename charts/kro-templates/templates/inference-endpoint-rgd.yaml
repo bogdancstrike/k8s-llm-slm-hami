@@ -158,6 +158,8 @@ spec:
                 # vLLM tensor-parallel size — must match nvidia.com/gpu count below
                 - name: TENSOR_PARALLEL_SIZE
                   value: ${string(schema.spec.gpuCards)}
+                - name: EXTRA_ARGS
+                  value: '${schema.metadata.name == "gemma-1b" ? "--served-model-name=gemma-1b" : "--enable-auto-tool-choice --tool-call-parser=hermes"}'
                 # llama.cpp env vars
                 - name: MODEL_FILE
                   value: ${schema.spec.modelFile}

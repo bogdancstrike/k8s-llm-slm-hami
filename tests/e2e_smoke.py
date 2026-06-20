@@ -383,6 +383,75 @@ def check_trace_pipeline() -> str:
     raise AssertionError(f"no trace landed in Jaeger within window ({last})")
 
 
+def check_trace_correlation() -> str:
+    """Send a request with traceparent header and verify correlation in Jaeger & Langfuse."""
+    import base64
+    import secrets
+
+    trace_id = secrets.token_hex(16)
+    span_id = secrets.token_hex(8)
+    traceparent = f"00-{trace_id}-{span_id}-01"
+
+    payload = {
+        "model": "smollm3-3b-quality",
+        "messages": [
+            {"role": "system", "content": "You are a concise assistant."},
+            {"role": "user", "content": "Reply with exactly one word: correlation"},
+        ],
+        "max_tokens": 10,
+        "temperature": 0.2,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {LITELLM_KEY}",
+        "traceparent": traceparent,
+    }
+
+    # Send request to LiteLLM
+    post_json(f"{LITELLM_URL}/v1/chat/completions", payload, headers, TIMEOUT)
+
+    # Query Jaeger and Langfuse with retries
+    auth_str = "pk-lf-00000000-0000-0000-0000-000000000001:sk-lf-00000000-0000-0000-0000-000000000001"
+    auth_header = f"Basic {base64.b64encode(auth_str.encode()).decode()}"
+    lf_headers = {"Authorization": auth_header}
+
+    deadline = time.monotonic() + min(TIMEOUT, 90)
+    jaeger_found = False
+    langfuse_found = False
+
+    last_err = ""
+    while time.monotonic() < deadline:
+        if not jaeger_found:
+            try:
+                # Query Jaeger
+                j_data = get_json(f"{JAEGER_URL}/api/traces/{trace_id}", timeout=10)
+                if j_data.get("data"):
+                    jaeger_found = True
+            except Exception as e:
+                last_err = f"Jaeger query failed: {e}"
+
+        if not langfuse_found:
+            try:
+                # Query Langfuse
+                lf_data = get_json(f"{LANGFUSE_URL}/api/public/traces/{trace_id}", headers=lf_headers, timeout=10)
+                # Verify trace exists and inputs/outputs are populated
+                inp = lf_data.get("input")
+                outp = lf_data.get("output")
+                assert inp, "Trace input in Langfuse is empty"
+                assert outp, "Trace output in Langfuse is empty"
+                langfuse_found = True
+            except Exception as e:
+                last_err = f"Langfuse query/assertion failed: {e}"
+
+        if jaeger_found and langfuse_found:
+            return f"correlated trace '{trace_id}' found in both Jaeger and Langfuse with non-empty input/output"
+
+        time.sleep(4)
+
+    raise AssertionError(f"trace correlation failed: {last_err}")
+
+
+
 # ═══ Cluster tier ═══════════════════════════════════════════════════════════
 
 def _rollout_ready(ns: str, kind: str, name: str) -> None:
@@ -559,6 +628,7 @@ def main() -> int:
     r.run("jaeger/ui", check_jaeger_ui)
     r.run("langfuse/health", check_langfuse)
     r.run("integration/trace-pipeline", check_trace_pipeline)
+    r.run("integration/trace-correlation", check_trace_correlation)
 
     # ── Cluster tier ───────────────────────────────────────────────────────
     print("\n── Cluster / integration tier ──────────────────────────────")

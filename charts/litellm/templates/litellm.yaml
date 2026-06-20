@@ -29,9 +29,7 @@ data:
 
     litellm_settings:
       telemetry: false
-      success_callback:
-        - otel
-      failure_callback:
+      callbacks:
         - otel
       num_retries: 2
       request_timeout: 600
@@ -110,13 +108,13 @@ spec:
             - name: OTEL_SERVICE_NAME
               value: "litellm-proxy"
             - name: LITELLM_OTEL_V2
-              value: "false"
+              value: "true"
             - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
-              value: "SPAN_ONLY"
+              value: "true"
             - name: LITELLM_OTEL_INTEGRATION_ENABLE_EVENTS
               value: "true"
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "service.namespace={{ .Values.namespace }},deployment.environment=poc"
+              value: "service.namespace={{ .Values.namespace }},deployment.environment=default"
             - name: OTEL_TRACES_SAMPLER
               value: "always_on"
             - name: K8S_POD_NAME

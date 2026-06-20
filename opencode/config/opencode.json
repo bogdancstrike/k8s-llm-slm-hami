@@ -26,8 +26,8 @@
         "smollm3-3b-quality": {
           "name": "Smollm3 3b Quality",
           "limit": {
-            "context": 32768,
-            "output": 8192
+            "context": 16384,
+            "output": 4096
           }
         }
       }

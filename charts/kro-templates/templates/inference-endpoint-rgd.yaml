@@ -129,6 +129,14 @@ spec:
           predictor:
             minReplicas: ${schema.spec.minReplicas}
             maxReplicas: ${schema.spec.maxReplicas}
+            # Recreate (terminate-before-create) instead of the default
+            # RollingUpdate surge. A surge would briefly run old+new pods, each
+            # holding a HAMi GPU slice (mem% + cores%) — two GPU models already
+            # consume ~70% cores, so a 3rd surged slice exceeds 100% and the new
+            # pod is stuck Pending with CardInsufficientCore. Recreate frees the
+            # old slice first. Trade-off: brief downtime while the model reloads.
+            deploymentStrategy:
+              type: Recreate
             model:
               # KRO interpolates backend into modelFormat.name.
               # KServe then matches: vllm → vllm-runtime, gguf → llamacpp-runtime.

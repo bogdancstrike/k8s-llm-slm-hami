@@ -4,6 +4,30 @@
 # ClickHouse, Redis/Valkey and S3/MinIO (deploy: true defaults below).
 langfuse:
   langfuse:
+    # Headless initialization — on first boot Langfuse creates this org, project
+    # (with the public/secret API keys below), and a login user. LiteLLM is wired
+    # to the same keys (charts/litellm/values.yaml) so tracing works with zero
+    # manual setup. Log in at http://langfuse.local.ro with the user creds below.
+    additionalEnv:
+      - name: LANGFUSE_INIT_ORG_ID
+        value: ai-platform
+      - name: LANGFUSE_INIT_ORG_NAME
+        value: "AI Platform"
+      - name: LANGFUSE_INIT_PROJECT_ID
+        value: ai-platform
+      - name: LANGFUSE_INIT_PROJECT_NAME
+        value: "AI Platform"
+      - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+        value: "pk-lf-00000000-0000-0000-0000-000000000001"
+      - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+        value: "sk-lf-00000000-0000-0000-0000-000000000001"
+      - name: LANGFUSE_INIT_USER_EMAIL
+        value: "admin@local.test"
+      - name: LANGFUSE_INIT_USER_NAME
+        value: "Admin"
+      - name: LANGFUSE_INIT_USER_PASSWORD
+        value: "ChangeMe-PoC-Only-2026"
+
     # PoC secrets — rotate for any real use.
     salt:
       value: "langfuse-salt-change-me-please"

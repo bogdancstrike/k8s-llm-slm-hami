@@ -23,12 +23,14 @@ database:
 # Image used by the wait-for-postgres init container.
 waitImage: postgres:16-alpine
 
-# Observability wiring.
+# Observability wiring. The Langfuse keys match the headless-init keys in
+# charts/langfuse/values.yaml, so the LiteLLM→Langfuse callback works out of the
+# box (every completion is logged to the auto-created "AI Platform" project).
 otelEndpoint: "http://otel-collector.ai-platform.svc.cluster.local:4317"
 langfuse:
   host: "http://langfuse-web.ai-platform.svc.cluster.local:3000"
-  publicKey: ""
-  secretKey: ""
+  publicKey: "pk-lf-00000000-0000-0000-0000-000000000001"
+  secretKey: "sk-lf-00000000-0000-0000-0000-000000000001"
 
 service:
   type: ClusterIP

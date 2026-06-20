@@ -63,6 +63,10 @@ spec:
     metadata:
       labels:
         {{- include "litellm.labels" . | nindent 8 }}
+      annotations:
+        # Restart the pod when the secret (master key, DB URL, Langfuse keys)
+        # changes — envFrom secret changes don't trigger a rollout on their own.
+        checksum/secrets: {{ printf "%s|%s|%s|%s|%s|%s" .Values.masterKey .Values.saltKey (include "litellm.databaseUrl" .) .Values.langfuse.host .Values.langfuse.publicKey .Values.langfuse.secretKey | sha256sum }}
     spec:
       initContainers:
         - name: wait-for-postgres

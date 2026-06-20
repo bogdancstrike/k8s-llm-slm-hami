@@ -17,7 +17,7 @@ spec:
   gpuCorePercent: 35
 
   quantization: "awq"
-  maxModelLen: 1024
+  maxModelLen: 8192
   gpuMemUtilization: "0.85"
 
   cpuRequest: "1"

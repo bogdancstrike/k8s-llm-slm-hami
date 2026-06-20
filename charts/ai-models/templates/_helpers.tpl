@@ -72,10 +72,7 @@ spec:
               if [ "$i" -eq 180 ]; then
                 echo "ERROR: model endpoint did not become ready: $MODEL_URL"; exit 1
               fi
-              ADDITIONAL_PARAMS=""
-              if [ "$BACKEND" = "llamacpp" ]; then
-                ADDITIONAL_PARAMS=', "drop_params": true, "additional_drop_params": ["tools", "tool_choice"]'
-              fi
+              ADDITIONAL_PARAMS=', "drop_params": true, "additional_drop_params": ["tools", "tool_choice"]'
               PAYLOAD=$(cat <<JSON
               {
                 "model_name": "$LITELLM_ALIAS",

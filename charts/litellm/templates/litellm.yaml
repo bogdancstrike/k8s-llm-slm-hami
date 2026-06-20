@@ -36,6 +36,7 @@ data:
       num_retries: 2
       request_timeout: 600
       drop_params: true
+      modify_params: true
 
     general_settings:
       store_model_in_db: true
@@ -111,7 +112,7 @@ spec:
             - name: LITELLM_OTEL_V2
               value: "false"
             - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
-              value: "true"
+              value: "SPAN_ONLY"
             - name: LITELLM_OTEL_INTEGRATION_ENABLE_EVENTS
               value: "true"
             - name: OTEL_RESOURCE_ATTRIBUTES

@@ -72,13 +72,17 @@ spec:
               if [ "$i" -eq 180 ]; then
                 echo "ERROR: model endpoint did not become ready: $MODEL_URL"; exit 1
               fi
+              ADDITIONAL_PARAMS=""
+              if [ "$BACKEND" = "llamacpp" ]; then
+                ADDITIONAL_PARAMS=', "drop_params": true, "additional_drop_params": ["tools", "tool_choice"]'
+              fi
               PAYLOAD=$(cat <<JSON
               {
                 "model_name": "$LITELLM_ALIAS",
                 "litellm_params": {
                   "model": "openai/$SERVED_NAME",
                   "api_base": "$MODEL_URL/v1",
-                  "api_key": "dummy-not-required-for-self-hosted"
+                  "api_key": "dummy-not-required-for-self-hosted"$ADDITIONAL_PARAMS
                 },
                 "model_info": {"id": "$MODEL_ID_TAG", "description": "$MODEL_DESC"}
               }

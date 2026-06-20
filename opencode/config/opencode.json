@@ -5,7 +5,8 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "LiteLLM",
       "options": {
-        "baseURL": "http://litellm.local.ro/v1"
+        "baseURL": "http://litellm.local.ro/v1",
+        "apiKey": "sk-litellm-master-change-me"
       },
       "models": {
         "gemma-1b-fast": {

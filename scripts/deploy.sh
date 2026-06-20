@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# deploy.sh — fresh teardown + redeploy of the AI Platform PoC.
+# deploy.sh — fresh teardown + redeploy of the AI Platform.
 #
-# Scope: only the PoC stack we own (the charts under charts/, one Helm release
+# Scope: only the stack we own (the charts under charts/, one Helm release
 # per app). Leaves pre-existing,
 # unrelated releases in the cluster alone (e.g. nvidia-device-plugin,
 # gpu-operator). Use `WIPE_EXTRA="${release_name}"` to also remove
@@ -88,7 +88,7 @@ confirm() {
   fi
   echo -e "\n${BOLD}${RED}⚠️  WARNING: DESTRUCTIVE ACTION AHEAD${NC}"
   echo -e "${RED}======================================================================${NC}"
-  echo -e "This will ${BOLD}${RED}UNINSTALL${NC} every PoC component in the cluster and reinstall it."
+  echo -e "This will ${BOLD}${RED}UNINSTALL${NC} every component in the cluster and reinstall it."
   echo -e "You will ${BOLD}${RED}LOSE${NC}:"
   echo -e "  ${RED}•${NC} All running model pods (weights re-download from HF on next boot)"
   echo -e "  ${RED}•${NC} All Langfuse projects, users and API keys"
@@ -239,7 +239,7 @@ if [[ -z "${SKIP_TEARDOWN:-}" ]]; then
     [[ -n "$ns" ]] && uninstall_release "$rel" "$ns" 10m
   done
 
-  log "deleting PoC namespaces (cascades remaining objects)"
+  log "deleting namespaces (cascades remaining objects)"
   $KUBECTL delete namespace cert-manager ai-platform inference \
     kserve kro-system --ignore-not-found=true --wait=false || true
 
@@ -457,7 +457,7 @@ LANGFUSE_PUB=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_PROJECT_PUBLIC
 LANGFUSE_SEC=$(dep_env_val ai-platform langfuse-web LANGFUSE_INIT_PROJECT_SECRET_KEY)
 
 echo -e "${GREEN}${BOLD}┌────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${GREEN}${BOLD}│                          🚀 DEPLOY COMPLETE — AI PLATFORM PoC                          │${NC}"
+echo -e "${GREEN}${BOLD}│                          🚀 DEPLOY COMPLETE — AI PLATFORM                          │${NC}"
 echo -e "${GREEN}${BOLD}├────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
 printf "│ %-86s │\n" "All components successfully deployed to the cluster."
 printf "│ %-86s │\n" ""

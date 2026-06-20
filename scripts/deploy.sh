@@ -4,7 +4,7 @@
 # Scope: only the PoC stack we own (the charts under charts/, one Helm release
 # per app). Leaves pre-existing,
 # unrelated releases in the cluster alone (e.g. nvidia-device-plugin,
-# gpu-operator, loki, tempo). Use `WIPE_EXTRA="loki tempo"` to also remove
+# gpu-operator). Use `WIPE_EXTRA="${release_name}"` to also remove
 # specific extra releases by name.
 #
 # Usage:
@@ -78,7 +78,7 @@ You will lose:
   - Grafana initial credentials (rotated on install)
   - The model-cache PVC (50 Gi of GGUF + HF weight downloads)
 
-Pre-existing releases NOT touched: gpu-operator, nvidia-device-plugin, loki, tempo.
+Pre-existing releases NOT touched: gpu-operator, nvidia-device-plugin.
 
 Type YES (uppercase) to proceed, anything else to abort:
 EOF

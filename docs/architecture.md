@@ -314,6 +314,16 @@ Both backends' env vars are always injected; each runtime ignores the
 irrelevant ones (vLLM ignores `MODEL_FILE`, llama.cpp ignores `MODEL_ID`). This
 avoids fragile CEL conditional-list construction.
 
+**Rollout strategy — `Recreate`.** The RGD pins every predictor `Deployment` to
+`deploymentStrategy.type: Recreate` (terminate-before-create) instead of the
+default `RollingUpdate` surge. The default would briefly run the old and new
+pods together, and each holds a HAMi slice (`gpumem-percentage` **and**
+`gpucores`). With two GPU models already consuming ~70 % of cores, a third
+surged slice exceeds 100 % and the new pod hangs `Pending` with
+`CardInsufficientCore` — a deadlock the rollout never escapes. `Recreate` frees
+the old slice first; the trade-off is a brief gap (seconds–minutes) while the
+model reloads, which is acceptable for single-replica PoC models.
+
 ### 4.2 HAMi vGPU allocation in detail
 
 ```mermaid
@@ -524,6 +534,21 @@ via `/v1/models`. The first user to sign up becomes admin.
 OPENAI_API_BASE_URL = http://litellm.ai-platform.svc.cluster.local:4000/v1
 OPENAI_API_KEY      = <litellm-master-key>
 ```
+
+### 5.7a OpenCode (IDE / coding-agent client)
+
+A second client lives in `opencode/config/`. [OpenCode](https://opencode.ai)
+points at LiteLLM (`http://litellm.local.ro/v1`) through the
+`@ai-sdk/openai-compatible` provider. `update-config.py` regenerates
+`opencode.json` from LiteLLM's `/v1/models`, stamping a per-model
+`limit: {context, output}` so the agent never requests more than a model's KV
+cache can hold. This matters because coding agents inject large tool/system
+prompts (~10 k tokens) and default to a huge `output` budget — without the cap,
+small local models return `ContextWindowExceededError`. The window each alias
+advertises must match the served model's `maxModelLen`/`ctxSize` (see
+[deploy_new_models.md §9](deploy_new_models.md#9-sizing-guide)). Tiny models like
+TinyLlama (2048) are unusable here — its window is smaller than the agent's
+prompt.
 
 ### 5.8 Langfuse
 

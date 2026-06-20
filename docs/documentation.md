@@ -215,13 +215,52 @@ curl -s http://litellm.local.ro/v1/chat/completions \
 
 ### Models bundled in the PoC
 
-| LiteLLM alias | Backend | HF model | Footprint |
-|---|---|---|---|
-| `gemma-1b-fast` | vLLM (GPU/HAMi) | `TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ` | ~2.6 GB vRAM |
-| `smollm3-3b-quality` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-0.5B-Instruct-AWQ` | ~4.6 GB vRAM |
-| `qwen-3b-cpu` | llama.cpp (CPU) | `Qwen/Qwen2.5-3B-Instruct-GGUF` q4_k_m | ~3 GB RAM |
+| LiteLLM alias | Backend | HF model | GPU/RAM slice | Context |
+|---|---|---|---|---|
+| `gemma-1b-fast` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-Coder-1.5B-Instruct-AWQ` | 40 % vRAM (~4 GB) | 16384 |
+| `smollm3-3b-quality` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-0.5B-Instruct-AWQ` | 40 % vRAM (~4 GB) | 16384 |
+| `qwen-3b-cpu` | llama.cpp (CPU) | `Qwen/Qwen2.5-3B-Instruct-GGUF` q4_k_m | ~3 GB RAM | 16384 |
 
-To add your own, see [deploy_new_models.md](deploy_new_models.md).
+The `gemma-1b-fast` slot serves Qwen2.5-Coder-1.5B (coding-tuned, tool calling
+enabled); it replaced TinyLlama, whose 2048-token window was too small for
+coding agents. The two GPU models coexist on the 10 GB RTX 3080: 40 % + 40 % vRAM
+and 35 % + 35 % cores reserved via HAMi (~80 % of the card). Trim a slice's
+`gpuMemPercentage` if you need to add a third GPU model. Each context
+window is bounded by what its KV cache fits in the slice — see
+[deploy_new_models.md §9](deploy_new_models.md#9-sizing-guide). To add your own,
+see [deploy_new_models.md](deploy_new_models.md).
+
+### Use from OpenCode (coding agent)
+
+[OpenCode](https://opencode.ai) and other IDE agents speak to LiteLLM as a plain
+OpenAI-compatible endpoint. Config is checked in under `opencode/config/`:
+
+| File | Purpose |
+|---|---|
+| `opencode.json` | OpenCode provider config — `baseURL`, API key, and one entry per model with a `limit: {context, output}`. |
+| `update-config.py` | Regenerates `opencode.json` from LiteLLM's live `/v1/models`, stamping the per-model limits from a built-in table. |
+
+```bash
+LITELLM_KEY="$(microk8s kubectl -n ai-platform get secret litellm-secrets \
+  -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}')" \
+LITELLM_KEY="$LITELLM_KEY" python3 opencode/config/update-config.py
+```
+
+**Why the `limit` matters.** Coding agents inject large tool/system prompts
+(~10 k tokens) and otherwise request a huge completion budget (OpenCode defaults
+to ~32 k). On a small local model that blows past the KV cache and LiteLLM
+returns `ContextWindowExceededError`. The `context`/`output` caps keep every
+request inside the served model's window, and **must match** the model's
+`maxModelLen` (vLLM) / `ctxSize` (llama.cpp):
+
+| Alias | context | output | Notes |
+|---|---|---|---|
+| `gemma-1b-fast` | 16384 | 4096 | Qwen2.5-Coder-1.5B — coding-tuned, tool calling on. Best for OpenCode. |
+| `smollm3-3b-quality` | 16384 | 4096 | Good general default for OpenCode. |
+| `qwen-3b-cpu` | 16384 | 4096 | CPU; higher latency but larger/stronger model. |
+
+If you change a model's `maxModelLen`/`ctxSize`, update both `opencode.json` and
+the `MODEL_LIMITS` table in `update-config.py` to keep them in sync.
 
 ---
 
@@ -329,6 +368,24 @@ the full matrix and flags):
 Useful env/flags: `LITELLM_URL`, `OPEN_WEBUI_URL`, `GRAFANA_URL`, `JAEGER_URL`,
 `LANGFUSE_URL`, `TIMEOUT`, `--junit out.xml`, `--no-cluster`.
 
+Two focused suites complement the smoke test:
+
+```bash
+# Deep observability — per-model trace correlation across Jaeger + Langfuse
+python3 tests/test_observability.py
+
+# Multi-turn chat scenarios — 3 conversations per model (geography, arithmetic,
+# coding) checking responses, multi-turn context, per-question latency, and that
+# each conversation's trace reaches BOTH Jaeger and Langfuse.
+LITELLM_KEY="$LITELLM_KEY" python3 tests/test_chat_scenarios.py
+```
+
+`test_chat_scenarios.py` hard-gates platform behaviour (every turn responds,
+anchor answers correct, traces present) and reports model answer-quality + timing
+(a 0.5B model legitimately flubs chained-reasoning follow-ups). Because every
+client (Open WebUI, OpenCode) routes through LiteLLM, its `otel` callback traces
+all of them — that's what these tests verify lands in Jaeger and Langfuse.
+
 ---
 
 ## 11. Operations cheat-sheet
@@ -385,7 +442,32 @@ microk8s kubectl -n inference logs -f deploy/<model>-predictor
   `huggingface-token` secret.
 - `CUDA out of memory` → lower `gpuMemUtilization` to `"0.75"` or raise
   `gpuMemPercentage`.
+- `ValueError: The model's max seq len (N) is larger than the maximum number of
+  tokens that can be stored in KV cache (M)` → `maxModelLen` doesn't fit the GPU
+  slice. Lower `maxModelLen` to ≤ M, or raise `gpuMemPercentage` (and re-sync the
+  OpenCode `limit`). See [deploy_new_models.md §9](deploy_new_models.md#9-sizing-guide).
 - `Connection timeout to Hugging Face` → egress firewall/NetworkPolicy.
+
+### New model pod stuck `Pending` during an upgrade — `CardInsufficientCore`
+
+A predictor rolled with the default surge would run old+new pods at once, each
+holding a HAMi `gpucores` slice — exceeding 100 % on this 2-GPU-model box. The
+RGD now pins predictors to `deploymentStrategy: Recreate` to prevent this. If you
+still hit it (e.g. a hand-edited Deployment), restore `Recreate` or delete the
+old pod so the new one can claim the slice:
+
+```bash
+microk8s kubectl -n inference get deploy <model>-predictor \
+  -o jsonpath='{.spec.strategy.type}{"\n"}'      # expect: Recreate
+```
+
+### LiteLLM returns `ContextWindowExceededError` (e.g. from OpenCode)
+
+The client asked for more tokens (prompt + completion) than the model's window.
+Fixes: lower the client's `max_tokens`, set/lower the OpenCode `limit` for that
+alias, or raise the model's `maxModelLen`/`ctxSize` (see the
+[OpenCode section](#use-from-opencode-coding-agent) in §6). TinyLlama
+(`gemma-1b-fast`, 2048) can't serve agent-sized prompts — use a Qwen alias.
 
 ### Pod `Ready` but not in LiteLLM
 
@@ -505,11 +587,15 @@ Manual fallback: Grafana → Dashboards → Import → paste JSON from
 │   ├── serving-runtimes/             vLLM + llama.cpp ClusterServingRuntimes
 │   ├── monitoring/                   Grafana dashboards + HAMi ServiceMonitors
 │   └── ai-models/                    example InferenceEndpoints + register Jobs
+├── opencode/config/
+│   ├── opencode.json                 OpenCode provider + per-model limits
+│   └── update-config.py              regenerates opencode.json from LiteLLM
 ├── scripts/
 │   ├── deploy.sh            one-shot installer / upgrader
 │   └── update-local-hosts.sh         maps *.local.ro hostnames to 127.0.0.1
 └── tests/
     ├── e2e_smoke.py                  stdlib-only e2e/integration suite
+    ├── test_observability.py        deep trace-correlation / span tests
     └── README.md
 ```
 

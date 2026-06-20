@@ -10,6 +10,7 @@ all four UIs — using only the Python 3 standard library (no `pip install`).
 |---|---|
 | `e2e_smoke.py` | End-to-end smoke tests: health checks, model chat, cluster readiness, trace pipeline |
 | `test_observability.py` | Deep observability tests: per-model trace correlation (Jaeger↔Langfuse), content fidelity, span attributes, tool-param dropping, context windows |
+| `test_chat_scenarios.py` | Realistic multi-turn conversations (geography / arithmetic / coding) per model: responsiveness, answer quality, multi-turn context, per-question latency, and per-conversation trace correlation in both Jaeger and Langfuse |
 
 ## What it covers
 
@@ -58,11 +59,32 @@ Deep observability tests exercising the full LiteLLM → OTel Collector → Jaeg
 | `multiturn/langfuse-trace` | A multi-message conversation produces a Langfuse trace with conversation context in the input |
 | `traceid/format-equivalence` | The 32-hex-char trace_id from `traceparent` is stored identically in both Jaeger and Langfuse |
 
+### `test_chat_scenarios.py`
+
+Three realistic multi-turn conversations run against **every** model, mirroring
+how Open WebUI / OpenCode drive the platform. The conversation history is threaded
+turn-to-turn so follow-ups genuinely test context handling.
+
+| Scenario | Turns | Tests |
+|---|---|---|
+| `geography` | 3 | factual recall + "which did I ask first?" follow-up |
+| `arithmetic` | 3 | a sum, then chained math over the previous answer |
+| `coding` | 2 | write a function, then extend it to a list |
+
+| Check | Asserts |
+|---|---|
+| `chat/<scenario>/<alias>` | Every turn returns a non-empty reply; the **anchor** turn (simple, deterministic) is answered correctly; the conversation's trace lands in **both** Jaeger and Langfuse — **for every model × scenario** |
+
+Hard gates are platform-level (responsiveness, anchor correctness, traces).
+Follow-up answer quality is **measured and reported** (a per-scenario `q_ok/q_total`
+column plus per-question latency) but report-only by default — a 0.5B model
+legitimately flubs chained reasoning. Set `QUALITY_THRESHOLD>0` to enforce a bar.
+
 The models under test:
 
 | Alias | Backend | Model |
 |---|---|---|
-| `gemma-1b-fast` | KServe + vLLM (GPU/HAMi) | TinyLlama 1.1B AWQ |
+| `gemma-1b-fast` | KServe + vLLM (GPU/HAMi) | Qwen2.5-Coder 1.5B AWQ (tool calling) |
 | `smollm3-3b-quality` | KServe + vLLM (GPU/HAMi) | Qwen2.5 0.5B AWQ |
 | `qwen-3b-cpu` | KServe + llama.cpp (CPU) | Qwen2.5 3B GGUF q4_k_m |
 
@@ -76,6 +98,11 @@ python3 tests/e2e_smoke.py
 
 # Observability-only tests (trace correlation, content, attributes)
 python3 tests/test_observability.py
+
+# Full multi-turn chat scenarios (responsiveness, quality, latency, tracing)
+LITELLM_KEY="$LITELLM_KEY" python3 tests/test_chat_scenarios.py
+# faster, skip trace verification:
+python3 tests/test_chat_scenarios.py --no-trace-check
 
 # HTTP tier only (e.g. from a workstation without kubectl)
 python3 tests/e2e_smoke.py --no-cluster

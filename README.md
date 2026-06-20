@@ -1,7 +1,7 @@
 # AI Platform — On-prem PoC
 
-> **Version:** 2.1
-> **Last updated:** 2026-06-19
+> **Version:** 2.2
+> **Last updated:** 2026-06-20
 > **Author:** Bogdan
 > **Inspiration:** AWS re:Invent 2026 — *"Building an Internal AI Platform with KRO"* — adapted from EKS+Karpenter+ACK to a single-node MicroK8s box with one RTX 3080.
 
@@ -79,11 +79,17 @@ Full diagrams (request flow, HAMi allocation, span trees) are in
 
 ## Models bundled in the PoC
 
-| LiteLLM alias | Backend | HF model | Footprint |
-|---|---|---|---|
-| `gemma-1b-fast` | vLLM (GPU/HAMi) | `TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ` | ~2.6 GB vRAM |
-| `smollm3-3b-quality` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-0.5B-Instruct-AWQ` | ~4.6 GB vRAM |
-| `qwen-3b-cpu` | llama.cpp (CPU) | `Qwen/Qwen2.5-3B-Instruct-GGUF` q4_k_m | ~3 GB RAM |
+| LiteLLM alias | Backend | HF model | GPU/RAM slice | Context |
+|---|---|---|---|---|
+| `gemma-1b-fast` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-Coder-1.5B-Instruct-AWQ` | 40 % vRAM (~4 GB) | 16384 |
+| `smollm3-3b-quality` | vLLM (GPU/HAMi) | `Qwen/Qwen2.5-0.5B-Instruct-AWQ` | 40 % vRAM (~4 GB) | 16384 |
+| `qwen-3b-cpu` | llama.cpp (CPU) | `Qwen/Qwen2.5-3B-Instruct-GGUF` q4_k_m | ~3 GB RAM | 16384 |
+
+(The `gemma-1b-fast` slot serves Qwen2.5-Coder-1.5B — the original TinyLlama's
+2048-token window was too small for coding agents.) The two GPU models share the
+10 GB RTX 3080 (40 % + 40 % vRAM, 35 % + 35 % cores)
+via HAMi. Context windows are bounded by what each model's KV cache fits in its
+slice — see [docs/deploy_new_models.md §9](docs/deploy_new_models.md#9-sizing-guide).
 
 Add your own: [docs/deploy_new_models.md](docs/deploy_new_models.md).
 
@@ -140,6 +146,24 @@ The suite checks every component — LiteLLM, each deployed model, Grafana,
 Jaeger, Langfuse, Open WebUI, Prometheus, and (when `kubectl` is available)
 in-cluster readiness. See [tests/README.md](tests/README.md).
 
+## Use from OpenCode (coding agent)
+
+The gateway is OpenAI-compatible, so [OpenCode](https://opencode.ai) (and
+similar IDE agents) can drive these models. Config lives in `opencode/config/`:
+
+```bash
+# Regenerate opencode.json from LiteLLM's live model list
+LITELLM_KEY="$(microk8s kubectl -n ai-platform get secret litellm-secrets \
+  -o go-template='{{index .data "LITELLM_MASTER_KEY" | base64decode}}')" \
+LITELLM_KEY="$LITELLM_KEY" python3 opencode/config/update-config.py
+```
+
+Each model gets a `limit: {context, output}` matching its server-side window, so
+the agent never overflows a small model's KV cache. All three aliases now carry a
+16384-token window, so any of them works in OpenCode (`gemma-1b-fast` is
+coding-tuned Qwen2.5-Coder-1.5B with tool calling enabled). Details:
+[docs/documentation.md §6](docs/documentation.md#6-using-the-platform).
+
 ---
 
 ## Repo layout
@@ -156,6 +180,7 @@ in-cluster readiness. See [tests/README.md](tests/README.md).
 │   ├── serving-runtimes/             vLLM + llama.cpp ClusterServingRuntimes
 │   ├── monitoring/                   Grafana dashboards + HAMi ServiceMonitors
 │   └── ai-models/                    example InferenceEndpoints + register Jobs
+├── opencode/config/                  OpenCode client config + generator script
 ├── scripts/
 │   ├── deploy.sh            one-shot installer / upgrader
 │   └── update-local-hosts.sh         maps *.local.ro hostnames to 127.0.0.1

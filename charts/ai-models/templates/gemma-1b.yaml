@@ -1,5 +1,10 @@
 ---
-# TinyLlama 1.1B AWQ — small fast GPU model exposed as the local "gemma" slot.
+# Qwen2.5-Coder 1.5B AWQ — small coding-tuned GPU model in the local "gemma" slot.
+#
+# Replaced the original TinyLlama-1.1B (2048-token context), which was too small
+# for coding agents: OpenCode's ~10k-token tool/system prompt overflowed the
+# window every turn and trapped it in a compaction loop. Qwen2.5-Coder-1.5B has a
+# 32768 native context and supports hermes-style tool calling — ideal for OpenCode.
 #
 # Drop a file like this in templates/ and apply the chart (or `kubectl apply`
 # the rendered CR): KRO expands it into a KServe InferenceService (the model)
@@ -14,27 +19,36 @@ metadata:
 spec:
   # Backend — vllm runs on GPU (HAMi vGPU partitioning)
   backend: vllm
-  model: "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ"
+  model: "Qwen/Qwen2.5-Coder-1.5B-Instruct-AWQ"
   servedName: "gemma-1b"
 
   # GPU allocation via HAMi
   # gpuCards = vLLM tensor-parallel size (1 = single GPU; 2+ shards across cards)
   gpuCards: 1
-  gpuMemMb: 5000
-  gpuMemPercentage: 30
+  gpuMemMb: 6500
+  # 40% (~4GB) so a 1.5B model's weights + a 16384 KV cache fit with headroom.
+  # Budget on the 10GB 3080: gemma 40% + smollm 40% = 80% (~8GB), cores 35%+35%.
+  gpuMemPercentage: 40
   gpuCorePercent: 35
 
   quantization: "awq"
-  # TinyLlama-1.1B is RoPE-trained at 2048 — this is its native ceiling. Going
-  # higher needs RoPE scaling and wrecks quality, so OpenCode is capped to match
-  # (see opencode.json limit). Not suitable for large-context agent workloads.
-  maxModelLen: 2048
+  # Qwen2.5-Coder-1.5B supports 32768; 16384 covers OpenCode (its prompt is ~10k
+  # tokens) plus a multi-thousand-token reply, and fits the 40% slice. Keep in
+  # sync with opencode.json's gemma-1b-fast context limit.
+  maxModelLen: 16384
   gpuMemUtilization: "0.85"
+  # --enforce-eager: the 1.5B model + 16384 KV fills the 40% VRAM slice (~1.05x
+  # concurrency) with no room for CUDA-graph capture, so skip it (small latency
+  # cost). --swap-space 2: shrink vLLM's CPU KV cache from the 4GB default to keep
+  # host RAM in check.
+  extraArgs: "--enforce-eager --swap-space 2"
 
   cpuRequest: "1"
   cpuLimit: "2"
-  memoryRequest: "4Gi"
-  memoryLimit: "8Gi"
+  # The 1.5B model + vLLM's CPU swap cache + CUDA host memory OOM-killed the pod
+  # at 8Gi (exit 137). Raised to 12Gi (host RAM is plentiful; no GPU impact).
+  memoryRequest: "6Gi"
+  memoryLimit: "12Gi"
 
   minReplicas: 1
   maxReplicas: 1
@@ -43,5 +57,5 @@ spec:
   litellmAlias: "gemma-1b-fast"
 {{- include "ai-models.registerJob" (dict
       "name" "gemma-1b" "alias" "gemma-1b-fast" "served" "gemma-1b"
-      "backend" "vllm" "desc" "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ via KServe + vLLM GPU"
+      "backend" "vllm" "desc" "Qwen/Qwen2.5-Coder-1.5B-Instruct-AWQ via KServe + vLLM GPU"
       "root" $) }}

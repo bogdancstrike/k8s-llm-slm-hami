@@ -85,6 +85,14 @@ microk8s kubectl -n inference get inferenceendpoint <name> \
   -o jsonpath='{.status.endpointUrl}{"\n"}'
 ```
 
+> **Rollout note.** The RGD pins every predictor `Deployment` to
+> `deploymentStrategy: Recreate` (terminate-before-create). Updating a model
+> therefore briefly takes it offline while the new pod loads — but it avoids the
+> GPU-slice surge deadlock a `RollingUpdate` would cause on this box (two GPU
+> models already use ~70 % of cores; a third surged slice exceeds 100 %). See
+> [§13](#13-troubleshooting-deployments) and
+> [architecture.md §4.1](architecture.md#41-inferenceendpoint--expanded-resources).
+
 Full internals are in
 [architecture.md §4](architecture.md#4-low-level-design).
 
@@ -323,6 +331,39 @@ Slice budget ≈ weights + KV cache (grows with `maxModelLen`) + CUDA context +
 activations. If vLLM logs `CUDA out of memory`, lower `gpuMemUtilization` to
 `"0.75"`, shrink `maxModelLen`, or raise `gpuMemPercentage`/`gpuCards`.
 
+### `maxModelLen` must fit the KV cache
+
+vLLM refuses to start if the requested context can't fit:
+
+```text
+ValueError: The model's max seq len (32768) is larger than the maximum number of
+tokens that can be stored in KV cache (15440). Try increasing
+gpu_memory_utilization or decreasing max_model_len.
+```
+
+The KV cache gets whatever vRAM is left in the slice after weights + overhead, so
+the **token capacity** scales with `gpuMemPercentage` × `gpuMemUtilization`. To
+raise `maxModelLen` you must give the slice more memory. Real example — the
+`smollm3-3b-quality` (Qwen2.5-0.5B-AWQ) model:
+
+| `gpuMemPercentage` | KV capacity | Max usable `maxModelLen` |
+|---|---|---|
+| 30 % (~3 GB) | ~15.4k tokens | < 16384 → **fails to boot** |
+| 40 % (~4 GB) | ~115k tokens (7× of 16384) | 16384 with headroom |
+
+Pick `maxModelLen` ≤ the capacity vLLM reports at boot
+(`Maximum concurrency for N tokens per request: X.XXx` ≥ 1.0 means it fits).
+**Keep `maxModelLen`/`ctxSize` in sync with any client context cap** — e.g. the
+OpenCode `limit.context` in `opencode/config/opencode.json` and the
+`MODEL_LIMITS` table in `update-config.py`. A client that thinks the window is
+larger than the server's will get `ContextWindowExceededError`.
+
+> **Context vs. agents.** Coding agents (OpenCode, etc.) send ~10k-token
+> tool/system prompts and compact the conversation when it nears the limit. A
+> model whose window is smaller than that prompt (e.g. TinyLlama at 2048) will
+> error on every turn and can trap the agent in a compaction loop — give any
+> agent-facing model a window of **at least ~16k**.
+
 ---
 
 ## 10. Verify a new model
@@ -421,6 +462,9 @@ transparently.
 |---|---|
 | Pod `Pending`, `Insufficient nvidia.com/gpumem` | HAMi can't fit the slice (or device plugin down). Lower `gpuMemPercentage`, free another model, or check `gpu=on` + driver + containerd `nvidia` runtime. |
 | Pod `Pending`, `Insufficient nvidia.com/gpu` | `gpuCards` > available GPU devices. Set `gpuCards: 1` on a single-GPU node. |
+| New pod `Pending`, `CardInsufficientCore` during an upgrade | Rollout surge ran old+new pods → combined `gpucores` > 100 %. The RGD now uses `deploymentStrategy: Recreate` to avoid this; if a Deployment was hand-edited back to `RollingUpdate`, restore `Recreate` or delete the old pod. |
+| vLLM: `max seq len … larger than … KV cache` | `maxModelLen` too big for the slice. Lower it or raise `gpuMemPercentage` — see [§9](#9-sizing-guide). |
+| Client gets `ContextWindowExceededError` (e.g. OpenCode) | Request exceeds the model window. Lower the client `max_tokens`/`limit`, or raise `maxModelLen`/`ctxSize`. TinyLlama (2048) is too small for coding agents. |
 | vLLM: `OSError: model is gated` | Missing/invalid HF token. Recreate the `huggingface-token` secret in `inference`. |
 | vLLM: `CUDA out of memory` | Lower `gpuMemUtilization` to `"0.75"`, shrink `maxModelLen`, or raise `gpuMemPercentage`. |
 | `default chat template is no longer allowed` | Tokenizer ships no chat template; runtime falls back to ChatML. If the pod predates the fallback, `rollout restart` it. |

@@ -13,8 +13,8 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-master-change-me")
 #   context = total window the server accepts (prompt + completion)
 #   output  = max completion tokens OpenCode will request
 MODEL_LIMITS = {
-    # TinyLlama-1.1B — RoPE ceiling is 2048; unsuitable for large-context agents.
-    "gemma-1b-fast": {"context": 2048, "output": 512},
+    # Qwen2.5-Coder-1.5B (in the "gemma" slot) — native 32768, capped to 16384.
+    "gemma-1b-fast": {"context": 16384, "output": 4096},
     # Qwen2.5-0.5B — native 32768, but capped to 16384 to fit the GPU KV cache.
     "smollm3-3b-quality": {"context": 16384, "output": 4096},
     # Qwen2.5-3B (CPU/llama.cpp) — ctxSize 16384.

@@ -88,6 +88,11 @@ spec:
       maxModelLen: integer | default=2048
       gpuMemUtilization: string | default="0.85"
 
+      # Extra vLLM CLI flags appended verbatim (space-separated). Escape hatch for
+      # per-model tuning, e.g. "--enforce-eager" to skip CUDA-graph capture (frees
+      # ~1-2GB when a slice is tight) or "--rope-scaling ...".
+      extraArgs: string | default=""
+
       # ─── llama.cpp-specific fields (used when backend=llamacpp) ────────
       # GGUF filename inside the model cache PVC (e.g. "qwen2.5-3b-instruct-q4_k_m.gguf")
       modelFile: string | default=""
@@ -166,8 +171,12 @@ spec:
                 # vLLM tensor-parallel size — must match nvidia.com/gpu count below
                 - name: TENSOR_PARALLEL_SIZE
                   value: ${string(schema.spec.gpuCards)}
+                # All vLLM models here are Qwen-family and support hermes-style
+                # tool calling — required by coding agents (OpenCode). The served
+                # name is already set from SERVED_NAME by the runtime. spec.extraArgs
+                # is appended for per-model tuning (e.g. --enforce-eager).
                 - name: EXTRA_ARGS
-                  value: '${schema.metadata.name == "gemma-1b" ? "--served-model-name=gemma-1b" : "--enable-auto-tool-choice --tool-call-parser=hermes"}'
+                  value: '--enable-auto-tool-choice --tool-call-parser=hermes ${schema.spec.extraArgs}'
                 # llama.cpp env vars
                 - name: MODEL_FILE
                   value: ${schema.spec.modelFile}

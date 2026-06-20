@@ -17,7 +17,9 @@ spec:
   gpuCorePercent: 35
 
   quantization: "awq"
-  maxModelLen: 8192
+  # Qwen2.5-0.5B native context is 32768 — set to the full window so OpenCode's
+  # large requests (prompt + completion) fit. KV cache for 0.5B at 32k is ~0.8GB.
+  maxModelLen: 32768
   gpuMemUtilization: "0.85"
 
   cpuRequest: "1"

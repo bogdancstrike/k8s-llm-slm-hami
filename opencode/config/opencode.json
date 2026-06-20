@@ -9,14 +9,26 @@
         "apiKey": "sk-litellm-master-change-me"
       },
       "models": {
-        "qwen-3b-cpu": {
-          "name": "Qwen 3b Cpu"
-        },
         "gemma-1b-fast": {
-          "name": "Gemma 1b Fast"
+          "name": "Gemma 1b Fast",
+          "limit": {
+            "context": 2048,
+            "output": 512
+          }
+        },
+        "qwen-3b-cpu": {
+          "name": "Qwen 3b Cpu",
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          }
         },
         "smollm3-3b-quality": {
-          "name": "Smollm3 3b Quality"
+          "name": "Smollm3 3b Quality",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
         }
       }
     }

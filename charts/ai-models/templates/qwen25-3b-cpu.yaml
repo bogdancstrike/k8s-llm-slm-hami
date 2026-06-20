@@ -15,7 +15,10 @@ spec:
   servedName: "qwen25-3b-cpu"
 
   # llama.cpp tuning
-  ctxSize: 2048
+  # CPU model (no VRAM impact). Qwen2.5-3B native context is 32768; 16384 is a
+  # balance — gives OpenCode real headroom while keeping CPU latency + KV-cache
+  # RAM sane (~0.6GB KV at 16k, well within the 8Gi memory limit).
+  ctxSize: 16384
   threads: 6           # physical cores (4–8 sweet spot)
   batchSize: 512
 

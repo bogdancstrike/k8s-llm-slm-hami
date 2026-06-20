@@ -25,6 +25,9 @@ spec:
   gpuCorePercent: 35
 
   quantization: "awq"
+  # TinyLlama-1.1B is RoPE-trained at 2048 — this is its native ceiling. Going
+  # higher needs RoPE scaling and wrecks quality, so OpenCode is capped to match
+  # (see opencode.json limit). Not suitable for large-context agent workloads.
   maxModelLen: 2048
   gpuMemUtilization: "0.85"
 

@@ -6,6 +6,21 @@ import os
 LITELLM_HOST = os.environ.get("LITELLM_HOST", "http://litellm.local.ro")
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-master-change-me")
 
+# Per-model context/output limits, keyed by LiteLLM model id.
+# OpenCode otherwise defaults to a huge output (32k) and overflows these tiny
+# models. Keep each {context, output} aligned with the served model's window
+# (maxModelLen for vLLM / ctxSize for llama.cpp) so requests never exceed it.
+#   context = total window the server accepts (prompt + completion)
+#   output  = max completion tokens OpenCode will request
+MODEL_LIMITS = {
+    # TinyLlama-1.1B — RoPE ceiling is 2048; unsuitable for large-context agents.
+    "gemma-1b-fast": {"context": 2048, "output": 512},
+    # Qwen2.5-0.5B — native 32768.
+    "smollm3-3b-quality": {"context": 32768, "output": 8192},
+    # Qwen2.5-3B (CPU/llama.cpp) — ctxSize 16384.
+    "qwen-3b-cpu": {"context": 16384, "output": 4096},
+}
+
 def main():
     config_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(config_dir, "opencode.json")
@@ -30,7 +45,10 @@ def main():
         if model_id:
             # Create a pretty name, e.g. "gemma-1b-fast" -> "Gemma 1b Fast"
             pretty_name = " ".join([w.capitalize() for w in model_id.replace("-", " ").replace("_", " ").split()])
-            models[model_id] = {"name": pretty_name}
+            entry = {"name": pretty_name}
+            if model_id in MODEL_LIMITS:
+                entry["limit"] = MODEL_LIMITS[model_id]
+            models[model_id] = entry
 
     print(f"Found models: {list(models.keys())}")
 
